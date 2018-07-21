@@ -7,6 +7,8 @@ To run:
 python3 -u tf_trainer.py [-a True] 2>&1 | tee training.log
 
 Works with TF v1.8 GPU, not with v1.9, as of 7/14/18.
+To check TF version:
+    python -c "import tensorflow as tf; print(tf.GIT_VERSION, tf.VERSION)"
 """
 
 from __future__ import division, print_function, absolute_import
@@ -41,7 +43,7 @@ NONSTAR_LABEL = [1, 0]
 #MODEL_DIR = HOME_DIR + '/models'
 MODEL_DIR = None
 
-SHUFFLE_BUFFER = 1000
+SHUFFLE_BUFFER = 10000
 NUM_EPOCHS = 100  # max epochs
 
 # from tensorflow.layers import ...
@@ -69,6 +71,7 @@ ARGS = parser.parse_args()
 
 # If adaptive smoothing, returns a numpy array of 8kx1 dimension (float32)
 # Otherwise returns a numpy array of 8kx2 dimension
+# TODO: Need to check for invalid ivar and reject the fits file.
 def featuresFromFits(filepath):
     print('Reading file {}'.format(filepath))
     spec = Spectrum(filepath)
@@ -78,11 +81,14 @@ def featuresFromFits(filepath):
         return smoothed_flux.reshape((len(smoothed_flux), 1))
     else:
         # Make both raw ivar and flux as channels.
-        flux = cleanAndLimit(spec.flux, 0)
+        flux = cleanValues(spec.flux)
         flux = np.float32(standardize(flux))
-        ivar = np.sqrt(spec.ivar)
-        ivar = cleanAndLimit(ivar, 2.5)
+
+        ivar = cleanValues(spec.ivar)
+        ivar = np.sqrt(ivar)
+        ivar = limitOutliers(ivar, 2.5)
         ivar = np.float32(standardize(ivar))
+
         if flux.shape != ivar.shape:
             raise ValueError(filepath + ': flux.shape: ' + flux.shape + ', ivar.shape: ' + ivar.shape)
         # Channels should be last, for most tf layers
@@ -266,9 +272,10 @@ def trainModel(train_metadata, test_metadata, LEARNING_RATE, BATCH_SIZE, DROP_RA
         print(pad + " |Training Loss: {:.3f} | Training Accuracy: {:.3f}"
               "".format(np.asscalar(t['loss']), np.asscalar(t['accuracy'])))
         validation_accuracies[epoch] = v['accuracy']
-        # TODO: Better early termination. See https://github.com/tensorflow/tensorflow/issues/18394
+        # TODO: Better early stopping. See https://github.com/tensorflow/tensorflow/issues/18394
+        # (the feature will be released in TF 1.10).
         # Should save and restore the previous best model.
-        if epoch > 8 and t['accuracy'] > 0.97 and t['accuracy'] > v['accuracy'] and np.mean(validation_accuracies[epoch-3:epoch+1]) < np.mean(validation_accuracies[epoch-5:epoch-1]):
+        if epoch > 8 and t['accuracy'] > 0.985 and t['accuracy'] > v['accuracy'] and np.mean(validation_accuracies[epoch-3:epoch+1]) < np.mean(validation_accuracies[epoch-5:epoch-1]):
             break
 
     results['accurate_runs'].append((v['accuracy'], 'batch: {} learn-rate: {:.4f} drop_rate: {:.2f}'.format(BATCH_SIZE, LEARNING_RATE, DROP_RATE)))
@@ -328,10 +335,11 @@ if __name__=='__main__':
     if ARGS.adaptive:
         print('Will use adaptive gaussian smoothing using ivar and flux.')
 
-    print('Starting at datetime: {}'.format(str(datetime.now())))
+    print('\nStarting at datetime: {}'.format(str(datetime.now())))
 
     train_metadata = datasetFromFitsDirectory(TRAIN_DATA_DIR, ARGS.fraction)
     test_metadata = datasetFromFitsDirectory(TEST_DATA_DIR)
+    print('Finished loading data at datetime: {}'.format(str(datetime.now())))
 
     results = {'incorrect': {},
                'accurate_runs' : [],

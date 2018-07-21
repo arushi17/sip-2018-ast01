@@ -24,13 +24,6 @@ def gaussianSmoothing(sigma, array):
     gaussian_array = ndimage.filters.gaussian_filter1d(array, sigma, truncate=4.0)
     return gaussian_array
 
-# chops values greater than max_value in a numpy array, scales by a multiplier
-def limitValues(value_array, max_value, multiplier):
-    for i in range(len(value_array)):
-        if (value_array[i] > max_value):
-            value_array[i] = max_value
-        value_array[i] = math.sqrt(value_array[i]) * multiplier
-
 # returns weights of gaussian windows of 15, 30, 60, and 120 for adaptive smoothing
 # window_size: size of desired window
 def getGaussianWindow(window_size):
@@ -43,18 +36,24 @@ def getGaussianWindow(window_size):
     else:
         return np.array([0])
 
-# limit_outliers, if > 1, specifies that outliers will be truncated to this many stddev
-def cleanAndLimit(series_in, limit_outliers):
+# Make sure each value is a valid positive float. If not, replace with a 0.
+# Returns a cleaned numpy array.
+def cleanValues(series_in):
     series = np.array(series_in) 
-    # Make sure each value is a valid float. If not, replace with a 0.
     for i in range(len(series)):
         try:
             n = float(series[i])
         except ValueError:
             series[i] = 0
-        if math.isnan(series[i]) or math.isinf(series[i]):
+        if series[i] < 0 or math.isnan(series[i]) or math.isinf(series[i]):
             series[i] = 0
+    return series
     
+
+# limit_outliers, if > 1, specifies that outliers will be truncated to this many stddev
+# Returns a new numpy array.
+def limitOutliers(series_in, limit_outliers):
+    series = np.array(series_in) 
     if limit_outliers <= 1:
         return series
 
@@ -103,11 +102,14 @@ def determineWindowSize(ivar, i, smooth_val):
 
 # returns cleaned up flux and ivar
 def cleanFluxIvar(flux_in, ivar_in):
-    ivar = np.sqrt(ivar_in)
-    ivar = cleanAndLimit(ivar, 2.5)
+    ivar = cleanValues(ivar_in)
+    ivar = np.sqrt(ivar)
+    ivar = limitOutliers(ivar, 2.5)
     ivar = scale(ivar, 0, 1)
-    flux = cleanAndLimit(flux_in, 0)
+
+    flux = cleanValues(flux_in)
     flux = scale(flux, 0, 1)
+
     return flux, ivar
 
 #TODO: limit scaling to reasonable range
