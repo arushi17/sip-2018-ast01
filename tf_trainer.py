@@ -29,7 +29,7 @@ from tensorflow.python.client import device_lib
 HOME_DIR = expanduser("~") + '/ast01'
 # where is the dataset?
 TRAIN_DATA_DIR = HOME_DIR + '/training_data'
-TEST_DATA_DIR = HOME_DIR + '/test_data'
+DEV_DATA_DIR = HOME_DIR + '/dev_data'
 STAR_DIR = 'star'
 NONSTAR_DIR = 'nonstar'
 # Use onehot style
@@ -206,12 +206,12 @@ def modelFn(features, labels, mode, params):
 
     train_op = tf.train.AdamOptimizer(learning_rate=params['learning_rate']).minimize(
         loss, global_step=tf.train.get_global_step(), 
-        name='train_acc' if is_training else 'test_acc')
+        name='train_acc' if is_training else 'dev_acc')
 
     # Assume onehot
     acc = tf.metrics.accuracy(labels=tf.argmax(labels, axis=1), 
                               predictions=tf.argmax(y_hat, axis=1),
-                              name='train_acc' if is_training else 'test_acc')
+                              name='train_acc' if is_training else 'dev_acc')
 
     metrics = {'accuracy': acc}
     # Make available to tensorboard in TRAIN mode. http://localhost:6006
@@ -225,7 +225,7 @@ def modelFn(features, labels, mode, params):
         eval_metric_ops=metrics)
 
 
-def trainModel(train_metadata, test_metadata, LEARNING_RATE, BATCH_SIZE, DROP_RATE, results):
+def trainModel(train_metadata, dev_metadata, LEARNING_RATE, BATCH_SIZE, DROP_RATE, results):
     print('==========================================================================')
     print('\nLEARNING_RATE: {}, BATCH_SIZE: {}, DROP_RATE: {}'.format(LEARNING_RATE, BATCH_SIZE, DROP_RATE))
     # The training dataset needs to last for all epochs, for use with one_shot_iterator.
@@ -236,18 +236,18 @@ def trainModel(train_metadata, test_metadata, LEARNING_RATE, BATCH_SIZE, DROP_RA
     def trainInputFn():
         return train_dataset.make_one_shot_iterator().get_next()
 
-    # For the test set, we generally want to evaluate/predict the entire set.
+    # For the dev set, we generally want to evaluate/predict the entire set.
     # Does the batch size even matter? conv1d gives dimension mismatch error without batching.
-    test_dataset = test_metadata['dataset']
-    test_dataset = test_dataset.batch(BATCH_SIZE)
+    dev_dataset = dev_metadata['dataset']
+    dev_dataset = dev_dataset.batch(BATCH_SIZE)
 
-    test_features = test_metadata['features']
-    test_labels = test_metadata['labels']
-    test_filenames = test_metadata['filenames']
+    dev_features = dev_metadata['features']
+    dev_labels = dev_metadata['labels']
+    dev_filenames = dev_metadata['filenames']
 
     # Returns features, label each time it is called.
-    def testInputFn():
-        return test_dataset.make_one_shot_iterator().get_next()
+    def devInputFn():
+        return dev_dataset.make_one_shot_iterator().get_next()
 
     # Build
     model = tf.estimator.Estimator(
@@ -265,9 +265,9 @@ def trainModel(train_metadata, test_metadata, LEARNING_RATE, BATCH_SIZE, DROP_RA
                     steps=len(train_metadata['labels'])/BATCH_SIZE)
                         # hooks=hooks)
         t = model.evaluate(trainInputFn)       
-        v = model.evaluate(testInputFn)
+        v = model.evaluate(devInputFn)
         pad = len("Epoch: {}/{}".format(epoch, NUM_EPOCHS)) * " "
-        print("\nEpoch: {}/{} |    Test Loss: {:.3f} |    Test Accuracy: {:.3f}"
+        print("\nEpoch: {}/{} |    Dev Loss: {:.3f} |    Dev Accuracy: {:.3f}"
               "".format(epoch+1, NUM_EPOCHS, np.asscalar(v['loss']), np.asscalar(v['accuracy'])))
         print(pad + " |Training Loss: {:.3f} | Training Accuracy: {:.3f}"
               "".format(np.asscalar(t['loss']), np.asscalar(t['accuracy'])))
@@ -280,22 +280,22 @@ def trainModel(train_metadata, test_metadata, LEARNING_RATE, BATCH_SIZE, DROP_RA
 
     results['accurate_runs'].append((v['accuracy'], 'batch: {} learn-rate: {:.4f} drop_rate: {:.2f}'.format(BATCH_SIZE, LEARNING_RATE, DROP_RATE)))
 
-    # Print the test confusion matrix.
+    # Print the dev confusion matrix.
     # Class labels need to be 0 or 1, not onehot.
-    truth_labels = test_labels.tolist()
-    predictions = list(model.predict(testInputFn))
+    truth_labels = dev_labels.tolist()
+    predictions = list(model.predict(devInputFn))
     predicted_classes = predictions
 
     # Print the filenames of the fits we got wrong, for further debugging/analysis
     print('\nTEST CASES WE GOT WRONG:')
     for i in range(len(truth_labels)):
-        test_filename = test_filenames[i]
+        dev_filename = dev_filenames[i]
         if (truth_labels[i] != predicted_classes[i]):
-            if not test_filename in results['incorrect']:
-                results['incorrect'][test_filename] = 1
+            if not dev_filename in results['incorrect']:
+                results['incorrect'][dev_filename] = 1
             else:
-                results['incorrect'][test_filename] = results['incorrect'][test_filename] + 1
-            print('Predicted {}, true {}: {}'.format(predicted_classes[i], truth_labels[i], test_filename))
+                results['incorrect'][dev_filename] = results['incorrect'][dev_filename] + 1
+            print('Predicted {}, true {}: {}'.format(predicted_classes[i], truth_labels[i], dev_filename))
 
     with tf.Session() as sess:
         confusion_matrix = tf.confusion_matrix(truth_labels, predicted_classes)
@@ -338,14 +338,14 @@ if __name__=='__main__':
     print('\nStarting at datetime: {}'.format(str(datetime.now())))
 
     train_metadata = datasetFromFitsDirectory(TRAIN_DATA_DIR, ARGS.fraction)
-    test_metadata = datasetFromFitsDirectory(TEST_DATA_DIR)
+    dev_metadata = datasetFromFitsDirectory(DEV_DATA_DIR)
     print('Finished loading data at datetime: {}'.format(str(datetime.now())))
 
     results = {'incorrect': {},
                'accurate_runs' : [],
               }
     for (learn_rate, batch, drop_rate) in itertools.product(LEARNING_RATES, BATCH_SIZES, DROP_RATES):
-        trainModel(train_metadata, test_metadata, learn_rate, batch, drop_rate, results)
+        trainModel(train_metadata, dev_metadata, learn_rate, batch, drop_rate, results)
 
     printResults(results)
 
