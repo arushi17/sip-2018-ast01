@@ -10,19 +10,62 @@ import shutil
 
 TARGET_DIR = os.path.expanduser("~") + '/ast01/training_data'
 
-def copy_1_fits_file(source_data_dir, maskname, slitname, objname, zqual, target_output, copied):
+# Given a maskname variant and objname, returns the unique ID using the underlying maskname.
+def unique_obj_id(mask_variant, objname):
+    # HALO7D mask variations
+    mask_map = {
+            'E0c': 'E0',
+            'E0d': 'E0',
+            'E1a': 'E1',
+            'E2a': 'E2',
+            'E3a': 'E3',
+            'E4a': 'E4',
+            'E5a': 'E5',
+            'E6a': 'E6',
+            'E7a': 'E7',
+            'GN0a': 'GN0',
+            'GN2a': 'GN2',
+            'GN3_cc': 'GN3',
+            'GN3e_t': 'GN3',
+            'GN3C': 'GN3',
+            'GN3D': 'GN3',
+            'c0c': 'c0',
+            'c1a': 'c1',
+            'c2a': 'c2',
+            'c3a': 'c3',
+            'gn1c': 'gn1',
+            'gn1d': 'gn1',
+            'gn1e_t': 'gn1',
+            'gs0d_0': 'gs0',
+            'gs1d_0': 'gs1',
+    }
+
+    true_mask = ''
+    if mask_variant.startswith('vdgc'):
+        true_mask = mask_variant
+    elif mask_variant not in mask_map:
+        print('Unknown HALO7D mask variant: {}'.format(mask_variant))
+        sys.exit(1)
+    else:
+        true_mask = mask_map[mask_variant]
+
+    return true_mask + '.' + objname
+
+def copy_1_fits_file(source_data_dir, maskname, slitname, objname, zqual, target_dir, known_zqual):
     filename = "spec1d." + maskname + "." + '{:0>3}'.format(slitname) + "." + objname + ".fits"
     zqual = int(zqual)
-    copied[filename] = 1
-    if zqual == 1 or zqual == 4:
-        print('zqual ' + str(zqual) + ': ' + source_data_dir + '/' + filename + ' --> ' + target_output + '/star')
-        shutil.copy(source_data_dir + '/' + filename, target_output + '/star')
+    # Keep track of each object that we have known classification for, even if we are not
+    # interested in each class. objname seems to be unique only within a mask.
+    known_zqual[unique_obj_id(maskname, objname)] = zqual
+    if zqual == 1 or zqual == 3 or zqual == 4:
+        print('zqual ' + str(zqual) + ': ' + source_data_dir + '/' + filename + ' --> ' + target_dir + '/star')
+        shutil.copy(source_data_dir + '/' + filename, target_dir + '/star')
     if zqual == 0:
-        print('zqual ' + str(zqual) + ': ' + source_data_dir + '/' + filename + ' --> ' + target_output + '/nonstar')
-        shutil.copy(source_data_dir + '/' + filename, target_output + '/nonstar')
+        print('zqual ' + str(zqual) + ': ' + source_data_dir + '/' + filename + ' --> ' + target_dir + '/nonstar')
+        shutil.copy(source_data_dir + '/' + filename, target_dir + '/nonstar')
 
 
-def copy_from_1_directory_zspec_fits(survey_dir, fits_data, target_output):
+def copy_from_1_directory_zspec_fits(survey_dir, fits_data, target_dir, known_zqual):
     maskname = fits_data.field('MASKNAME')[0]
     print('\n++++++++ Processing mask: {} from zspec.fits'.format(maskname))
     
@@ -35,22 +78,11 @@ def copy_from_1_directory_zspec_fits(survey_dir, fits_data, target_output):
     print(zqual)
     
     source_data_dir = survey_dir + '/' + maskname
-    copied = {}  # Empty dict
     for i in range(len(zqual)):
-        copy_1_fits_file(source_data_dir, maskname, slitname[i], objname[i], zqual[i], target_output, copied)
-
-    # All halo7d files NOT mentioned in zspec.fits are nonstars 
-    if os.path.basename(survey_dir) == 'halo7d':
-        print(source_data_dir + '/spec1d*.fits')
-        all_files = glob.glob(source_data_dir + '/spec1d*.fits')
-        for filepath in all_files:
-            filename = os.path.basename(filepath)
-            if filename not in copied:
-                print('Not in zspec.fits: ' + filepath + ' --> ' + target_output + '/nonstar')
-                shutil.copy(filepath, target_output + '/nonstar')
+        copy_1_fits_file(source_data_dir, maskname, slitname[i], objname[i], zqual[i], target_dir, known_zqual)
 
 
-def copy_from_1_directory_ppxf_path(survey_dir, ppxf_path, target_output):
+def copy_from_1_directory_ppxf_path(survey_dir, ppxf_path, target_dir, known_zqual):
     # Extract maskname from filename
     maskname = re.search(r"(.+?)_ppxf.dat", os.path.basename(ppxf_path)).group(1)
     print('\n++++++++ Processing mask: {} from ppxf.dat'.format(maskname))
@@ -66,7 +98,7 @@ def copy_from_1_directory_ppxf_path(survey_dir, ppxf_path, target_output):
     
     for i in range(len(lines_list)):
         line = lines_list[i]
-        print('line: ' + line)
+        # print('line: ' + line)
         split_line_list = line.split()
         objname.append(split_line_list[0])
         slitname.append(split_line_list[1])
@@ -75,13 +107,12 @@ def copy_from_1_directory_ppxf_path(survey_dir, ppxf_path, target_output):
     print(slitname)
     print(objname)
     print(zqual)
-    copied = {}
     for i in range(len(zqual)):
-        copy_1_fits_file(source_data_dir, maskname, slitname[i], objname[i], zqual[i], target_output, copied)
+        copy_1_fits_file(source_data_dir, maskname, slitname[i], objname[i], zqual[i], target_dir, known_zqual)
 
 
-# Process a survey, such as vdgc or halo7d.
-def process_survey(survey_dir, target_dir):
+# Process HALO7D survey
+def process_halo7d_survey(survey_dir, target_dir, known_zqual):
     zspec_fits = glob.glob(survey_dir + '/zspec/zspec*.fits')
     for fits_file in zspec_fits:
         zspec = fits.open(fits_file)
@@ -89,13 +120,59 @@ def process_survey(survey_dir, target_dir):
         data = zspec[1].data
     
         print(fits_file)
-        copy_from_1_directory_zspec_fits(survey_dir, data, target_dir)
+        copy_from_1_directory_zspec_fits(survey_dir, data, target_dir, known_zqual)
 
     ppxf_list = glob.glob(survey_dir + '/zspec/*_ppxf.dat')
     for ppxf_file in ppxf_list:
         print(ppxf_file)
-        copy_from_1_directory_ppxf_path(survey_dir, ppxf_file, target_dir)
+        copy_from_1_directory_ppxf_path(survey_dir, ppxf_file, target_dir, known_zqual)
+
+    # All halo7d files NOT mentioned in zspec.fits or ppxf.dat are nonstars 
+    extra_dirs = [survey_dir + '/GN3_cc']  # No zqual for these, but they are confirmed galaxies
+    extra_dirs.extend(glob.glob(survey_dir + '/deimos_spr14/*'))
+
+    for source_data_dir in extra_dirs:
+        print('\n++++++++ Processing extra dir: {}'.format(source_data_dir))
+        all_files = glob.glob(source_data_dir + '/spec1d*.fits')
+        for filepath in all_files:
+            filename = os.path.basename(filepath)
+            m = re.search('spec1d\.(.+)\.[0-9]+\.(.+)\.fits', filename)
+            maskname = m.group(1)
+            objname = m.group(2)
+            if objname.startswith('serendip'):
+                continue  # We don't trust that these serendipitous objects are galaxies
+
+            objid = unique_obj_id(maskname, objname)
+            if objid not in known_zqual:
+                known_zqual[objid] = 0  # Galaxy
+                print('Not in zspec.fits: ' + filepath + ' --> ' + target_dir + '/nonstar')
+                shutil.copy(filepath, target_dir + '/nonstar')
 
 
-process_survey(os.path.expanduser("~") + '/ast01/halo7d', TARGET_DIR)
-process_survey(os.path.expanduser("~") + '/ast01/vdgc', TARGET_DIR)
+# Process VDGC survey
+def process_vdgc_survey(survey_dir, target_dir, known_zqual):
+    zspec_fits = glob.glob(survey_dir + '/zspec/zspec*.fits')
+    for fits_file in zspec_fits:
+        zspec = fits.open(fits_file)
+        #zspec.info()
+        data = zspec[1].data
+    
+        print(fits_file)
+        # TODO: Should we exclude serendip from VDGC? We do have ZQual for them (most nonstars).
+        copy_from_1_directory_zspec_fits(survey_dir, data, target_dir, known_zqual)
+
+
+# All halo7d files NOT mentioned in zspec.fits or ppxf.dat are nonstars.
+# Use this map to keep track of them.
+known_zqual = {}  # Empty dict
+
+process_vdgc_survey(os.path.expanduser("~") + '/ast01/vdgc', TARGET_DIR, known_zqual)
+process_halo7d_survey(os.path.expanduser("~") + '/ast01/halo7d', TARGET_DIR, known_zqual)
+
+print('\n++++++++ SUMMARY')
+# Invert the map so we can print summary stats
+inv_map = {}
+for k, v in known_zqual.items():
+    inv_map.setdefault(v, []).append(k)
+for k, v in inv_map.items():
+    print('\nZQual {}: {} spectra\n{}'.format(k, len(v), sorted(v)))
