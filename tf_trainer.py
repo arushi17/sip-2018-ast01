@@ -5,6 +5,7 @@ Uses Estimator (new eager execution style).
 
 To protect from being killed by terminal closing:
 nohup $SHELL -c "python3 -u tf_trainer.py [-a True] 2>&1 | grep --line-buffered -v gpu_device.cc > ../logs/training.log" &
+tail -f ../logs/training.log
 
 Works with TF v1.8 GPU, not with v1.9, as of 7/14/18.
 To check TF version:
@@ -51,20 +52,21 @@ NUM_CHECKPOINTS_SAVED = 20
 # For early stopping, we look for an increase in dev error relative to the best model so far,
 # expressed as a percentage.
 ES_MIN_GENERALIZATION_LOSS = 5.0
-ES_MIN_PROGRESS_QUOTIENT = 2.0
+ES_MIN_PROGRESS_QUOTIENT = 1.0
 
 # from tensorflow.layers import ...
+# We learn weights for these:
 conv1d = tf.layers.conv1d
 dense = tf.layers.dense
+dropout = tf.layers.dropout
+# No weights for these:
 max_pooling1d = tf.layers.max_pooling1d
 flatten = tf.layers.flatten
 relu = tf.nn.relu
-dropout = tf.layers.dropout
 xavier_init = tf.contrib.layers.xavier_initializer()
 regularizer = tf.contrib.layers.l2_regularizer
 
 parser = argparse.ArgumentParser(description='Loads spectra from fits files, trains model.')
-parser.add_argument('-s', '--sigma', type=int, default=0, help='Sigma to be used in gaussian smoothing. 0 if no smoothing.') 
 parser.add_argument('-a', '--adaptive', type=bool, default=False, help='Use adaptive gaussian smoothing that combines ivar and flux into one series.') 
 parser.add_argument('-f', '--fraction', type=float, default=1.0, help='Fraction of training data to be loaded.') 
 ARGS = parser.parse_args()
@@ -99,7 +101,7 @@ def featuresFromFits(filepath):
 
         if flux.shape != ivar.shape:
             raise ValueError(filepath + ': flux.shape: ' + flux.shape + ', ivar.shape: ' + ivar.shape)
-        # Channels should be last, for most tf layers
+        # Channels should be last for most tf layers
         return np.transpose(np.array([flux, ivar]))
 
 
@@ -125,6 +127,7 @@ def datasetFromFitsDirectory(directory_path, load_fraction=1.0):
         feature_data.append(featuresFromFits(fname))
         label_data.append(NONSTAR_LABEL)
         filenames.append(os.path.basename(fname))
+
     features = np.array(feature_data)
     labels = np.array(label_data)
     class_labels = np.argmax(labels, axis=1) # 0 or 1
@@ -145,7 +148,7 @@ def small1dcnn(x, num_classes, is_training, drop_rate, l2_scale):
     net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool1')
     # 410 x 8
 
-    net = conv1d(net, 16, 61, 10, data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    net = conv1d(net, 16, 61, strides=10, data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
     # 41 x 16
     net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool2')
     # 20 x 16
@@ -164,7 +167,7 @@ def small1dcnn(x, num_classes, is_training, drop_rate, l2_scale):
 # Tensorflow network architecture definition
 def medium1dcnn(x, num_classes, is_training, drop_rate, l2_scale):
     # Channels refers to flux/ivar (2 channels), or if adaptive smoothing, a single channel.
-    net = conv1d(x, 8, 30, strides=5, data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    net = conv1d(x, 8, 31, strides=5, data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
     # conv1d reshapes output to [batch, out_width, out_channels]
     # 1633 x 8
     net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool1')
@@ -172,14 +175,14 @@ def medium1dcnn(x, num_classes, is_training, drop_rate, l2_scale):
     # net = dropout(net, rate=drop_rate, training=is_training, name='pool1_dropout')
     # 820 x 8
 
-    net = conv1d(net, 16, 30, 5, data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    net = conv1d(net, 16, 31, 5, data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
     # 164 x 16
     net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool2')
     # 82 x 16
     net = dropout(net, rate=drop_rate, training=is_training, name='pool2_dropout')
     # 82 x 16
 
-    net = conv1d(net, 32, 30, 5, data_format='channels_last', activation=relu, name='conv3', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    net = conv1d(net, 32, 31, 5, data_format='channels_last', activation=relu, name='conv3', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
     # 16 x 32
     net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool3')
     # 8 x 32
@@ -262,7 +265,7 @@ def shouldStopEarly(training_accuracies, training_losses, dev_accuracies, dev_lo
         progress = 0.01  # Some small number to cause progress_quotient to be exceeded
 
     progress_quotient = generalization_loss / progress
-    if progress_quotient < ES_MIN_PROGRESS_QUOTIENT or generalization_loss < ES_MIN_GENERALIZATION_LOSS:
+    if training_accuracies[epoch] < 0.999 and (progress_quotient < ES_MIN_PROGRESS_QUOTIENT or generalization_loss < ES_MIN_GENERALIZATION_LOSS):
         # TODO: Remove. Debugging
         print('Progress quotient: {:.3f}, generalization loss: {:.3f}, not stopping.'.format(progress_quotient, generalization_loss))
         return None
@@ -382,23 +385,23 @@ def trainModel(train_metadata, dev_metadata, learning_rate, batch_size, drop_rat
         if best_checkpoint:
             break
 
-    # TODO: Restore the best model from the saved checkpoints and re-evaluate dev on it using model.predict().
     if not best_checkpoint:
         # Exceeded NUM_EPOCHS
         best_checkpoint = checkpoint_tracker[-1]
+
     cp_path, cp_dev_loss, cp_dev_acc = best_checkpoint
     results['accurate_runs'].append((cp_dev_acc, 'dev_acc: {:.3f} batch_size: {} learn_rate: {:.4f} drop_rate: {:.2f} l2_scale: {:.2f} cp_path: {}'.format(cp_dev_acc, batch_size, learning_rate, drop_rate, l2_scale, cp_path)))
 
-    print('\nRun results: {}'.format(results['accurate_runs'][-1]))
+    print('\nRUN RESULTS: {}'.format(results['accurate_runs'][-1][1]))
 
     deleteExtraCheckpoints(cp_path)
-    # Print the dev confusion matrix using the best checkpointed model.
-    # Class labels need to be 0 or 1, not onehot.
-    truth_labels = dev_labels.tolist()
-    predictions = list(model.predict(devInputFn, checkpoint_path=cp_path))
-    predicted_classes = predictions
+
+    # Restore the best model from the saved checkpoints and re-evaluate dev on it using model.predict().
+    predicted_classes = list(model.predict(devInputFn, checkpoint_path=cp_path))
 
     # Print the filenames of the fits we got wrong, for further debugging/analysis
+    # Class labels need to be 0 or 1, not onehot.
+    truth_labels = dev_labels.tolist()
     print('\nTEST CASES WE GOT WRONG:')
     for i in range(len(truth_labels)):
         dev_filename = dev_filenames[i]
@@ -409,6 +412,7 @@ def trainModel(train_metadata, dev_metadata, learning_rate, batch_size, drop_rat
                 results['incorrect'][dev_filename] = results['incorrect'][dev_filename] + 1
             print('Predicted {}, true {}: {}'.format(predicted_classes[i], truth_labels[i], dev_filename))
 
+    # Print the dev confusion matrix using the best checkpointed model.
     with tf.Session() as sess:
         confusion_matrix = tf.confusion_matrix(truth_labels, predicted_classes)
         matrix_to_print = sess.run(confusion_matrix)
@@ -443,9 +447,9 @@ if __name__=='__main__':
     # High learning rates cause error/accuracy to jump around and interfere with early stopping,
     # but strong regularization seems to help.
     LEARNING_RATES = [3e-4, 1e-3]
-    BATCH_SIZES = [32, 48]
+    BATCH_SIZES = [32]
     DROP_RATES = [0.2, 0.25]
-    L2_SCALES = [0.03, 0.06]
+    L2_SCALES = [0.05, 0.1]
 
     if ARGS.adaptive:
         print('Will use adaptive gaussian smoothing using ivar and flux.')
@@ -459,7 +463,9 @@ if __name__=='__main__':
     results = {'incorrect': {},
                'accurate_runs' : [],
               }
-    for (learn_rate, batch, drop_rate, l2_scale) in itertools.product(LEARNING_RATES, BATCH_SIZES, DROP_RATES, L2_SCALES):
+    combinations = list(itertools.product(LEARNING_RATES, BATCH_SIZES, DROP_RATES, L2_SCALES))
+    random.shuffle(combinations)
+    for (learn_rate, batch, drop_rate, l2_scale) in combinations:
         trainModel(train_metadata, dev_metadata, learn_rate, batch, drop_rate, l2_scale, results)
 
     printResults(results)
