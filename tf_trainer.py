@@ -45,14 +45,14 @@ NONSTAR_LABEL = [1, 0]
 MODEL_DIR = HOME_DIR + '/models'
 #MODEL_DIR = None
 
-NUM_EPOCHS = 300  # max epochs
+NUM_EPOCHS = 100  # max epochs
 SHUFFLE_BUFFER = 10000
 
 NUM_CHECKPOINTS_SAVED = 20
 # For early stopping, we look for an increase in dev error relative to the best model so far,
 # expressed as a percentage.
-ES_MIN_GENERALIZATION_LOSS = 5.0
-ES_MIN_PROGRESS_QUOTIENT = 1.0
+ES_MIN_GENERALIZATION_LOSS = 1.0
+ES_MIN_PROGRESS_QUOTIENT = 0.5
 
 # from tensorflow.layers import ...
 # We learn weights for these:
@@ -300,6 +300,8 @@ def deleteExtraCheckpoints(cp_path):
 def trainModel(train_metadata, dev_metadata, learning_rate, batch_size, drop_rate, l2_scale, results):
     print('==========================================================================')
     print('\nBEGIN LEARNING_RATE: {}, BATCH_SIZE: {}, DROP_RATE: {}, L2_SCALE: {}'.format(learning_rate, batch_size, drop_rate, l2_scale))
+    start_time = time.time()
+
     # The training dataset needs to last for all epochs, for use with one_shot_iterator.
     train_dataset = train_metadata['dataset']
     train_dataset = train_dataset.shuffle(SHUFFLE_BUFFER).repeat(NUM_EPOCHS).batch(batch_size)
@@ -386,7 +388,7 @@ def trainModel(train_metadata, dev_metadata, learning_rate, batch_size, drop_rat
             break
 
     if not best_checkpoint:
-        # Exceeded NUM_EPOCHS
+        # Exceeded NUM_EPOCHS. TODO: Select the best from saved epochs.
         best_checkpoint = checkpoint_tracker[-1]
 
     cp_path, cp_dev_loss, cp_dev_acc = best_checkpoint
@@ -402,7 +404,7 @@ def trainModel(train_metadata, dev_metadata, learning_rate, batch_size, drop_rat
     # Print the filenames of the fits we got wrong, for further debugging/analysis
     # Class labels need to be 0 or 1, not onehot.
     truth_labels = dev_labels.tolist()
-    print('\nTEST CASES WE GOT WRONG:')
+    print('\nDEV EXAMPLES WE GOT WRONG:')
     for i in range(len(truth_labels)):
         dev_filename = dev_filenames[i]
         if (truth_labels[i] != predicted_classes[i]):
@@ -419,17 +421,20 @@ def trainModel(train_metadata, dev_metadata, learning_rate, batch_size, drop_rat
         print('\nCONFUSION MATRIX:')
         print(matrix_to_print)
 
-    print('\nEND LEARNING_RATE: {}, BATCH_SIZE: {}, DROP_RATE: {}, L2_SCALE: {}'.format(learning_rate, batch_size, drop_rate, l2_scale))
+    elapsed_time = time.time() - start_time
+    elapsed_hours = int(elapsed_time / 3600)
+    elapsed_minutes = int((elapsed_time - (elapsed_hours * 3600)) / 60)
+    print('\nEND LEARNING_RATE: {}, BATCH_SIZE: {}, DROP_RATE: {}, L2_SCALE: {} ({} epochs, {} hours {} mins)'.format(learning_rate, batch_size, drop_rate, l2_scale, epoch, elapsed_hours, elapsed_minutes))
     print('==========================================================================')
 
 
 def printResults(results):
     results['accurate_runs'].sort(reverse=True)
-    print('HYPERPARAMETERS WITH HIGHEST TEST ACCURACY:')
+    print('\nHYPERPARAMETERS WITH HIGHEST DEV ACCURACY:')
     for acc, params in results['accurate_runs']:
-        print('Accuracy: {:.3f}, {}'.format(acc, params))
+        print(params)
     most_wrong = sorted(results['incorrect'].items(), key=lambda kv: kv[1], reverse=True)
-    print('SPECTRA THAT WERE PREDICTED INCORRECTLY THE MOST:')
+    print('\nSPECTRA THAT WERE PREDICTED INCORRECTLY THE MOST:')
     for name, numwrong in most_wrong:
         print('{}: {}'.format(name, numwrong))
 
