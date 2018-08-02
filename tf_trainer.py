@@ -24,6 +24,8 @@ import math
 import numpy as np
 import os
 import random
+import re
+import time
 import tensorflow as tf
 from tensorflow.python.client import device_lib
 
@@ -58,8 +60,8 @@ ES_MIN_PROGRESS_QUOTIENT = 0.5
 # We learn weights for these:
 conv1d = tf.layers.conv1d
 dense = tf.layers.dense
-dropout = tf.layers.dropout
 # No weights for these:
+dropout = tf.layers.dropout
 max_pooling1d = tf.layers.max_pooling1d
 flatten = tf.layers.flatten
 relu = tf.nn.relu
@@ -92,17 +94,24 @@ def featuresFromFits(filepath):
     else:
         # Make both raw ivar and flux as channels.
         flux = cleanValues(spec.flux)
+        # TODO: Try just scaling flux from 0 to 1
         flux = np.float32(standardize(flux))
 
         ivar = cleanValues(spec.ivar)
         ivar = np.sqrt(ivar)
         ivar = limitOutliers(ivar, 2.5)
-        ivar = np.float32(standardize(ivar))
+        # ivar = np.float32(standardize(ivar))
+        # TODO: ivar of 0 has a special meaning (don't trust the flux)
+        ivar = scale(ivar, 0, 1.0)
+
+        # loglam = np.float32(logLamConvert(spec.lam))
 
         if flux.shape != ivar.shape:
             raise ValueError(filepath + ': flux.shape: ' + flux.shape + ', ivar.shape: ' + ivar.shape)
         # Channels should be last for most tf layers
-        return np.transpose(np.array([flux, ivar]))
+        # TODO: added logx wavelength as third channel
+        # return np.transpose(np.array([flux, ivar, loglam]))
+        return np.transpose(np.array([flux]))
 
 
 # Returns tf.data.Dataset, class labels
@@ -140,7 +149,36 @@ def datasetFromFitsDirectory(directory_path, load_fraction=1.0):
 
 
 # Tensorflow network architecture definition
-def small1dcnn(x, num_classes, is_training, drop_rate, l2_scale):
+
+# TODO: Make some of the conv1d sizes etc hyperparameters
+def verySmall1DCNN(x, num_classes, is_training, drop_rate, l2_scale):
+    # Channels refers to flux/ivar (2 channels), or if adaptive smoothing, a single channel.
+    # Smoothing layer (only 1 filter), not learning features in this layer.
+    # Input: 8k x # channels, outputs: 810 x 1, weights: # channels x 61 x 2
+    net = conv1d(x, 1, 61, strides=10, data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+
+    # Extract low-level features (individual absorption and emission lines)
+    # Input: 810 x 2, outputs: 192 x 4, weights: 2 x 40 x 4 = 320
+    net = conv1d(net, 4, 40, strides=2, data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    # Input: 192 x 4, outputs: 96 x 4, weights: 0
+    net = max_pooling1d(net, 4, 4, data_format='channels_last', name='pool1')
+    net = dropout(net, rate=drop_rate, training=is_training, name='pool1_dropout')
+
+    # Extract higher-level features (specific combinations of absorption and emission lines)
+    # Input: 96 x 4, outputs: 56 x 8, weights: 4 x 40 x 8 = 1280
+    net = conv1d(net, 8, 40, strides=1, data_format='channels_last', activation=relu, name='conv3', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    # Input: 56 x 8, outputs: 1 x 8, weights: 0
+    net = max_pooling1d(net, 56, 56, data_format='channels_last', name='pool2')
+    net = dropout(net, rate=drop_rate, training=is_training, name='pool2_dropout')
+
+    # Input: 1 x 8
+    net = flatten(net, name='flatten')
+    # Input: 8 x 1, outputs: 2 x 1, weights: 16
+    logits = dense(net, num_classes, name='fc1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    return logits, x
+
+
+def small1DCNN(x, num_classes, is_training, drop_rate, l2_scale):
     # Channels refers to flux/ivar (2 channels), or if adaptive smoothing, a single channel.
     net = conv1d(x, 8, 61, strides=10, data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
     # conv1d reshapes output to [batch, out_width, out_channels]
@@ -155,7 +193,7 @@ def small1dcnn(x, num_classes, is_training, drop_rate, l2_scale):
     net = dropout(net, rate=drop_rate, training=is_training, name='pool2_dropout')
     # 20 x 16
 
-    net = flatten(net, name='pool3d_flattened')
+    net = flatten(net, name='flatten')
     # 320
     net = dense(net, 64, activation=relu, name='fc1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
     net = dropout(net, rate=drop_rate, training=is_training, name='fc1_dropout')
@@ -164,8 +202,7 @@ def small1dcnn(x, num_classes, is_training, drop_rate, l2_scale):
     return logits, x
 
 
-# Tensorflow network architecture definition
-def medium1dcnn(x, num_classes, is_training, drop_rate, l2_scale):
+def medium1DCNN(x, num_classes, is_training, drop_rate, l2_scale):
     # Channels refers to flux/ivar (2 channels), or if adaptive smoothing, a single channel.
     net = conv1d(x, 8, 31, strides=5, data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
     # conv1d reshapes output to [batch, out_width, out_channels]
@@ -189,7 +226,7 @@ def medium1dcnn(x, num_classes, is_training, drop_rate, l2_scale):
     net = dropout(net, rate=drop_rate, training=is_training, name='pool3_dropout')
     # 8 x 32
 
-    net = flatten(net, name='pool3d_flattened')
+    net = flatten(net, name='flatten')
     # 256
     net = dense(net, 64, activation=relu, name='fc1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
     net = dropout(net, rate=drop_rate, training=is_training, name='fc1_dropout')
@@ -198,11 +235,30 @@ def medium1dcnn(x, num_classes, is_training, drop_rate, l2_scale):
     return logits, x
 
 
+# Print summary about the learned network, including weights.
+# Input: Estimator (model). Should be called only after a checkpoint has been created.
+def printNetworkInfo(model, print_weights=False):
+    print('\nLEARNED WEIGHTS INFO:')
+    total_weights = 0
+    for layer_name in model.get_variable_names():
+        # Care about weights of only conv and dense (fc) layers
+        if not re.match(r'conv.*/kernel$', layer_name) and not re.match(r'fc.*/kernel$', layer_name):
+            continue
+        weights = model.get_variable_value(layer_name)
+        num_weights = np.prod(weights.shape)
+        print('Layer {} has {} weights {}'.format(layer_name, num_weights, str(weights.shape)))
+        total_weights += num_weights
+        if print_weights:
+            print('{}: {}'.format(layer_name, weights))
+
+    print('This model has {} trainable parameters/weights.'.format(total_weights))
+
+
 # Needs to follow this signature, per tf.estimator. Should support TRAIN, EVAL, PREDICT
 # Assumes labels follows the onehot style.
 def modelFn(features, labels, mode, params):
     is_training = (mode == tf.estimator.ModeKeys.TRAIN)
-    logits, x = medium1dcnn(x=features['features'], 
+    logits, x = verySmall1DCNN(x=features['features'], 
                             num_classes=params['num_classes'], 
                             is_training=is_training,
                             drop_rate=params['drop_rate'],
@@ -248,7 +304,7 @@ def modelFn(features, labels, mode, params):
 # TODO: Better early stopping. See https://github.com/tensorflow/tensorflow/issues/18394
 # (the feature will be released in TF 1.10).
 def shouldStopEarly(training_accuracies, training_losses, dev_accuracies, dev_losses, checkpoint_tracker, epoch):
-    if epoch < 10 or training_accuracies[epoch] < dev_accuracies[epoch]:
+    if epoch < 10:
         # Clearly too early to stop training
         return None
     lowest_dev_loss = np.min(dev_losses[0:epoch+1])
@@ -267,7 +323,7 @@ def shouldStopEarly(training_accuracies, training_losses, dev_accuracies, dev_lo
     progress_quotient = generalization_loss / progress
     if training_accuracies[epoch] < 0.999 and (progress_quotient < ES_MIN_PROGRESS_QUOTIENT or generalization_loss < ES_MIN_GENERALIZATION_LOSS):
         # TODO: Remove. Debugging
-        print('Progress quotient: {:.3f}, generalization loss: {:.3f}, not stopping.'.format(progress_quotient, generalization_loss))
+        # print('Progress quotient: {:.3f}, generalization loss: {:.3f}, not stopping.'.format(progress_quotient, generalization_loss))
         return None
 
     # Should stop now. Find the best saved checkpoint using accuracy (not loss).
@@ -324,13 +380,13 @@ def trainModel(train_metadata, dev_metadata, learning_rate, batch_size, drop_rat
         return dev_dataset.make_one_shot_iterator().get_next()
 
     # Creates additional configurations for the estimator
-    num_steps_in_epoch = int(len(train_metadata['labels'])/batch_size)
+    num_steps_in_epoch = max(1, int(len(train_metadata['labels'])/batch_size))
     print('Number of steps in epoch: {}'.format(num_steps_in_epoch))
 
     # TODO: Looks like a bug: Estimator is producing one extra checkpoint per requested
     # checkpoint (one step after the requested one). So double the number of checkpoints.
     my_checkpointing_config = tf.estimator.RunConfig(
-        save_summary_steps = 1000,  # Write to events.out.tfevents file less often than default 100.
+        save_summary_steps = 10000,  # Write to events.out.tfevents file less often than default 100.
         save_checkpoints_steps = num_steps_in_epoch,  # Save checkpoints every epoch.
         keep_checkpoint_max = 2*NUM_CHECKPOINTS_SAVED,  # Retain so many recent checkpoints.
     )
@@ -349,7 +405,7 @@ def trainModel(train_metadata, dev_metadata, learning_rate, batch_size, drop_rat
                 'num_classes': 2},
         model_dir=model_save_dir,
         config=my_checkpointing_config)
-    
+
     # Keeps track of loss and accuracy after each epoch
     checkpoint_tracker = []
 
@@ -369,10 +425,7 @@ def trainModel(train_metadata, dev_metadata, learning_rate, batch_size, drop_rat
         latest_train_loss = np.asscalar(eval_of_train['loss'])
         latest_dev_acc = np.asscalar(eval_of_dev['accuracy'])
         latest_dev_loss = np.asscalar(eval_of_dev['loss'])
-        print("Epoch: {}/{}\nDev Loss:      {:.3f}   |   Dev Accuracy:      {:.3f}"
-              "".format(epoch+1, NUM_EPOCHS, latest_dev_loss, latest_dev_acc))
-        print("Training Loss: {:.3f}   |   Training Accuracy: {:.3f}"
-              "".format(latest_train_loss, latest_train_acc))
+        print("Epoch: {}/{} => Train Loss: {:.3f}, Dev Loss: {:.3f}. Train Acc: {:.3f}, Dev Acc: {:.3f}".format(epoch+1, NUM_EPOCHS, latest_train_loss, latest_dev_loss, latest_train_acc, latest_dev_acc))
         
         training_accuracies[epoch] = latest_train_acc
         training_losses[epoch] = latest_train_loss
@@ -396,8 +449,6 @@ def trainModel(train_metadata, dev_metadata, learning_rate, batch_size, drop_rat
 
     print('\nRUN RESULTS: {}'.format(results['accurate_runs'][-1][1]))
 
-    deleteExtraCheckpoints(cp_path)
-
     # Restore the best model from the saved checkpoints and re-evaluate dev on it using model.predict().
     predicted_classes = list(model.predict(devInputFn, checkpoint_path=cp_path))
 
@@ -420,6 +471,10 @@ def trainModel(train_metadata, dev_metadata, learning_rate, batch_size, drop_rat
         matrix_to_print = sess.run(confusion_matrix)
         print('\nCONFUSION MATRIX:')
         print(matrix_to_print)
+
+    # Print network info. This uses latest checkpoint, so delete extra checkpoints after this.
+    printNetworkInfo(model, True)
+    deleteExtraCheckpoints(cp_path)
 
     elapsed_time = time.time() - start_time
     elapsed_hours = int(elapsed_time / 3600)
@@ -453,8 +508,8 @@ if __name__=='__main__':
     # but strong regularization seems to help.
     LEARNING_RATES = [3e-4, 1e-3]
     BATCH_SIZES = [32]
-    DROP_RATES = [0.2, 0.25]
-    L2_SCALES = [0.05, 0.1]
+    DROP_RATES = [0.01, 0.03]
+    L2_SCALES = [0.01, 0.03]
 
     if ARGS.adaptive:
         print('Will use adaptive gaussian smoothing using ivar and flux.')
