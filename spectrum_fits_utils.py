@@ -158,3 +158,13 @@ def adaptiveSmoothing(flux_in, ivar_in, smooth_val='adaptive'):
 
     return smoothed_flux
 
+# returns a numpy array containing spectrum wavelength adjusted to log scale
+def logLamConvert(lam):
+    loglam = np.zeros(len(lam))
+    for i in range(len(lam)):
+        if lam[i] <= 0:
+            loglam[i] = 0
+        else:
+            loglam[i] = np.log(lam[i])
+    return loglam
+
