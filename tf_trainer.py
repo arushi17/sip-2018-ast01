@@ -47,14 +47,14 @@ NONSTAR_LABEL = [1, 0]
 MODEL_DIR = HOME_DIR + '/models'
 #MODEL_DIR = None
 
-NUM_EPOCHS = 100  # max epochs
+NUM_EPOCHS = 200  # max epochs
 SHUFFLE_BUFFER = 10000
 
 NUM_CHECKPOINTS_SAVED = 20
 # For early stopping, we look for an increase in dev error relative to the best model so far,
 # expressed as a percentage.
 ES_MIN_GENERALIZATION_LOSS = 1.0
-ES_MIN_PROGRESS_QUOTIENT = 0.5
+ES_MIN_PROGRESS_QUOTIENT = 0.4
 
 # from tensorflow.layers import ...
 # We learn weights for these:
@@ -100,9 +100,9 @@ def featuresFromFits(filepath):
         ivar = cleanValues(spec.ivar)
         ivar = np.sqrt(ivar)
         ivar = limitOutliers(ivar, 2.5)
-        # ivar = np.float32(standardize(ivar))
+        ivar = np.float32(standardize(ivar))
         # TODO: ivar of 0 has a special meaning (don't trust the flux)
-        ivar = scale(ivar, 0, 1.0)
+        # ivar = scale(ivar, 0, 1.0)
 
         # loglam = np.float32(logLamConvert(spec.lam))
 
@@ -111,7 +111,7 @@ def featuresFromFits(filepath):
         # Channels should be last for most tf layers
         # TODO: added logx wavelength as third channel
         # return np.transpose(np.array([flux, ivar, loglam]))
-        return np.transpose(np.array([flux]))
+        return np.transpose(np.array([flux, ivar]))
 
 
 # Returns tf.data.Dataset, class labels
@@ -158,9 +158,9 @@ def verySmall1DCNN(x, num_classes, is_training, drop_rate, l2_scale):
     net = conv1d(x, 1, 61, strides=10, data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
 
     # Extract low-level features (individual absorption and emission lines)
-    # Input: 810 x 2, outputs: 192 x 4, weights: 2 x 40 x 4 = 320
+    # Input: 810 x 2, outputs: 384 x 4, weights: 2 x 40 x 4 = 320
     net = conv1d(net, 4, 40, strides=2, data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
-    # Input: 192 x 4, outputs: 96 x 4, weights: 0
+    # Input: 384 x 4, outputs: 96 x 4, weights: 0
     net = max_pooling1d(net, 4, 4, data_format='channels_last', name='pool1')
     net = dropout(net, rate=drop_rate, training=is_training, name='pool1_dropout')
 
@@ -236,7 +236,7 @@ def medium1DCNN(x, num_classes, is_training, drop_rate, l2_scale):
 
 
 # Print summary about the learned network, including weights.
-# Input: Estimator (model). Should be called only after a checkpoint has been created.
+# Input: Estimator (model). Requires latest checkpoint to be available.
 def printNetworkInfo(model, print_weights=False):
     print('\nLEARNED WEIGHTS INFO:')
     total_weights = 0
@@ -296,17 +296,29 @@ def modelFn(features, labels, mode, params):
         eval_metric_ops=metrics)
 
 
-# Returns the best checkpoint_tracker entry if early stopping criteria are met
-# (that is, we should stop training now). Otherwise returns None.
+# Returns the index of the checkpoint entry with the highest dev accuracy
+def bestCheckpointIndex(checkpoint_tracker):
+    cp_max_acc = 0
+    i = 0
+    best_i = 0
+    for cp_file, dev_loss, dev_acc in checkpoint_tracker:
+        if dev_acc > cp_max_acc:
+            cp_max_acc = dev_acc
+            best_i = i
+        i = i + 1
+    return best_i
+
+
+# Returns True if early stopping criteria are met (that is, we should stop training now).
 # See https://page.mi.fu-berlin.de/prechelt/Biblio/stop_tricks1997.pdf
 # Using the second approach in this paper, which waits for the training rate to
 # plateau before considering early stopping.
 # TODO: Better early stopping. See https://github.com/tensorflow/tensorflow/issues/18394
 # (the feature will be released in TF 1.10).
-def shouldStopEarly(training_accuracies, training_losses, dev_accuracies, dev_losses, checkpoint_tracker, epoch):
+def shouldStopEarly(training_accuracies, training_losses, dev_accuracies, dev_losses, epoch):
     if epoch < 10:
         # Clearly too early to stop training
-        return None
+        return False
     lowest_dev_loss = np.min(dev_losses[0:epoch+1])
     latest_dev_loss = dev_losses[epoch]
     generalization_loss = 100.0 * (latest_dev_loss/lowest_dev_loss - 1.0)
@@ -322,22 +334,11 @@ def shouldStopEarly(training_accuracies, training_losses, dev_accuracies, dev_lo
 
     progress_quotient = generalization_loss / progress
     if training_accuracies[epoch] < 0.999 and (progress_quotient < ES_MIN_PROGRESS_QUOTIENT or generalization_loss < ES_MIN_GENERALIZATION_LOSS):
-        # TODO: Remove. Debugging
-        # print('Progress quotient: {:.3f}, generalization loss: {:.3f}, not stopping.'.format(progress_quotient, generalization_loss))
-        return None
+        return False
 
     # Should stop now. Find the best saved checkpoint using accuracy (not loss).
     print('Progress quotient: {:.3f}, generalization loss: {:.3f}, stopping early!'.format(progress_quotient, generalization_loss))
-    cp_max_acc = 0
-    i = 0
-    best_i = epoch
-    for cp_file, dev_loss, dev_acc in checkpoint_tracker:
-        if dev_acc > cp_max_acc:
-            cp_max_acc = dev_acc
-            best_i = i
-        i = i + 1
-
-    return checkpoint_tracker[best_i]
+    return True
 
 
 # Given a checkpoint_path like /home/arushi/ast01/models/2018-07-25-07-19-13/model.ckpt-1581
@@ -425,7 +426,7 @@ def trainModel(train_metadata, dev_metadata, learning_rate, batch_size, drop_rat
         latest_train_loss = np.asscalar(eval_of_train['loss'])
         latest_dev_acc = np.asscalar(eval_of_dev['accuracy'])
         latest_dev_loss = np.asscalar(eval_of_dev['loss'])
-        print("Epoch: {}/{} => Train Loss: {:.3f}, Dev Loss: {:.3f}. Train Acc: {:.3f}, Dev Acc: {:.3f}".format(epoch+1, NUM_EPOCHS, latest_train_loss, latest_dev_loss, latest_train_acc, latest_dev_acc))
+        print("Epoch: {:02d}/{} => Train Loss: {:.3f}, Dev Loss: {:.3f}. Train Acc: {:.3f}, Dev Acc: {:.3f}".format(epoch+1, NUM_EPOCHS, latest_train_loss, latest_dev_loss, latest_train_acc, latest_dev_acc))
         
         training_accuracies[epoch] = latest_train_acc
         training_losses[epoch] = latest_train_loss
@@ -436,15 +437,12 @@ def trainModel(train_metadata, dev_metadata, learning_rate, batch_size, drop_rat
         # Keep only as much data as we have checkpoints saved
         checkpoint_tracker = checkpoint_tracker[-NUM_CHECKPOINTS_SAVED:]
 
-        best_checkpoint = shouldStopEarly(training_accuracies, training_losses, dev_accuracies, dev_losses, checkpoint_tracker, epoch)
-        if best_checkpoint:
+        if shouldStopEarly(training_accuracies, training_losses, dev_accuracies, dev_losses, epoch):
             break
 
-    if not best_checkpoint:
-        # Exceeded NUM_EPOCHS. TODO: Select the best from saved epochs.
-        best_checkpoint = checkpoint_tracker[-1]
+    best_cp_index = bestCheckpointIndex(checkpoint_tracker)
+    cp_path, cp_dev_loss, cp_dev_acc = checkpoint_tracker[best_cp_index]
 
-    cp_path, cp_dev_loss, cp_dev_acc = best_checkpoint
     results['accurate_runs'].append((cp_dev_acc, 'dev_acc: {:.3f} batch_size: {} learn_rate: {:.4f} drop_rate: {:.2f} l2_scale: {:.2f} cp_path: {}'.format(cp_dev_acc, batch_size, learning_rate, drop_rate, l2_scale, cp_path)))
 
     print('\nRUN RESULTS: {}'.format(results['accurate_runs'][-1][1]))
@@ -479,7 +477,7 @@ def trainModel(train_metadata, dev_metadata, learning_rate, batch_size, drop_rat
     elapsed_time = time.time() - start_time
     elapsed_hours = int(elapsed_time / 3600)
     elapsed_minutes = int((elapsed_time - (elapsed_hours * 3600)) / 60)
-    print('\nEND LEARNING_RATE: {}, BATCH_SIZE: {}, DROP_RATE: {}, L2_SCALE: {} ({} epochs, {} hours {} mins)'.format(learning_rate, batch_size, drop_rate, l2_scale, epoch, elapsed_hours, elapsed_minutes))
+    print('\nEND LEARNING_RATE: {}, BATCH_SIZE: {}, DROP_RATE: {}, L2_SCALE: {} ({} epochs, {} hours {} mins)'.format(learning_rate, batch_size, drop_rate, l2_scale, epoch+1, elapsed_hours, elapsed_minutes))
     print('==========================================================================')
 
 
@@ -517,7 +515,7 @@ if __name__=='__main__':
     print('\nStarting at datetime: {}'.format(str(datetime.now())))
 
     train_metadata = datasetFromFitsDirectory(TRAIN_DATA_DIR, ARGS.fraction)
-    dev_metadata = datasetFromFitsDirectory(DEV_DATA_DIR, ARGS.fraction)
+    dev_metadata = datasetFromFitsDirectory(DEV_DATA_DIR, 1.0)
     print('Finished loading data at datetime: {}'.format(str(datetime.now())))
 
     results = {'incorrect': {},
