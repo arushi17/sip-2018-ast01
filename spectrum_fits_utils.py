@@ -168,3 +168,27 @@ def logLamConvert(lam):
             loglam[i] = np.log(lam[i])
     return loglam
 
+# returns flux and wavelengths of a spectrum converted to a desired number of pixels, adjusted to log scale
+def logBinPixels(num_pix, lam, flux):
+    # determine how many log(lam) each pixel in adjusted image should cover
+    min_loglam = math.log(lam[0])
+    max_loglam = math.log(lam[len(lam)-1])
+    pix_width = (max_loglam - min_loglam) / num_pix
+    # create array of boundaries for pixel bins in terms of log(lam), stores upper boundary
+    bin_bound = np.zeros(num_pix)
+    for i in range(num_pix):
+        logspace_boundary = min_loglam + pix_width * (i + 1)
+        bin_bound[i] = logspace_boundary
+    # go through lam array and fill pixel bins by taking mean of all below the boundary
+    adj_spec = np.zeros(num_pix)
+    end_pix = 0
+    for bound in range(num_pix):
+        start_pix = end_pix
+        while end_pix < len(flux) and lam[end_pix] < math.exp(bin_bound[bound]): 
+            end_pix += 1
+        slice_flux = flux[start_pix:end_pix]
+        bin_av = np.mean(slice_flux)
+        print('start: {}, num_lam_pix: {}, mean: {}'.format(start_pix, len(slice_flux), bin_av))
+        adj_spec[bound] = bin_av
+    return adj_spec, bin_bound
+        
