@@ -4,6 +4,8 @@
 
 from spectrum_class import Spectrum
 from pandas import Series
+import matplotlib
+matplotlib.use('Agg')
 from matplotlib import pyplot
 from scipy import ndimage
 import argparse
@@ -52,7 +54,8 @@ def gaussianAndSave(input_path, outputPath, smooth_type, smooth_val, plot_type):
     else:    
         # default, generates normal raw spectrum
         series, series_ivar = defaultGaussianAndSave(spec, plot_type, fig)
-        series_ivar.plot()
+        if series_ivar:
+            series_ivar.plot()
         series.plot(figsize=(10,6))
         #TODO: fig.legend((series_ivar, series), ('ivar', 'flux'), 'upper left')
 
@@ -62,6 +65,7 @@ def gaussianAndSave(input_path, outputPath, smooth_type, smooth_val, plot_type):
 
 # gaussianAndSave function for default parameters, generates raw spectrum
 def defaultGaussianAndSave(spec, plot_type, fig):
+    series_ivar = None
     if plot_type == 'flux':
         series = Series(spec.flux, spec.lam)
     elif plot_type == 'ivar':
