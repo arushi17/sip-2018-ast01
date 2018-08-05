@@ -70,6 +70,7 @@ regularizer = tf.contrib.layers.l2_regularizer
 
 parser = argparse.ArgumentParser(description='Loads spectra from fits files, trains model.')
 parser.add_argument('-a', '--adaptive', type=bool, default=False, help='Use adaptive gaussian smoothing that combines ivar and flux into one series.') 
+parser.add_argument('-l', '--loglam', type=int, default=0, help='Use adaptive gaussian smoothing AND log(lambda) rescaling and binning of adaptive flux into this pixel width.') 
 parser.add_argument('-f', '--fraction', type=float, default=1.0, help='Fraction of training data to be loaded.') 
 ARGS = parser.parse_args()
 
@@ -91,6 +92,14 @@ def featuresFromFits(filepath):
         # We have only one channel, smoothed flux.
         smoothed_flux = np.float32(standardize(adaptiveSmoothing(spec.flux, spec.ivar)))
         return smoothed_flux.reshape((len(smoothed_flux), 1))
+    elif ARGS.loglam:
+        # We have only one channel, smoothed flux. Also stretch/compress it so that pixel
+        # distance between any known emission/absorption features is the same irrespective of
+        # amount of redshift (z). Also re-bin the flux into a smaller number of pixels.
+        smoothed_flux = adaptiveSmoothing(spec.flux, spec.ivar)
+        flux, lam = logBinPixels(ARGS.loglam, spec.lam, smoothed_flux)
+        log_binned_flux = np.float32(standardize(flux))
+        return log_binned_flux.reshape((len(log_binned_flux), 1))
     else:
         # Make both raw ivar and flux as channels.
         flux = cleanValues(spec.flux)
@@ -104,13 +113,9 @@ def featuresFromFits(filepath):
         # TODO: ivar of 0 has a special meaning (don't trust the flux)
         # ivar = scale(ivar, 0, 1.0)
 
-        # loglam = np.float32(logLamConvert(spec.lam))
-
         if flux.shape != ivar.shape:
             raise ValueError(filepath + ': flux.shape: ' + flux.shape + ', ivar.shape: ' + ivar.shape)
         # Channels should be last for most tf layers
-        # TODO: added logx wavelength as third channel
-        # return np.transpose(np.array([flux, ivar, loglam]))
         return np.transpose(np.array([flux, ivar]))
 
 
@@ -149,8 +154,65 @@ def datasetFromFitsDirectory(directory_path, load_fraction=1.0):
 
 
 # Tensorflow network architecture definition
-
 # TODO: Make some of the conv1d sizes etc hyperparameters
+
+def logBin2Conv2Dense(x, num_classes, is_training, drop_rate, l2_scale):
+    # Extract low-level features (individual absorption and emission lines)
+    # Input: 20 x 1, outputs: 20 x 4, weights: 1 x 10 x 4 = 40
+    net = conv1d(x, 4, 10, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    # Input: 20 x 4, outputs: 10 x 4, weights: 0
+    net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool1')
+    net = dropout(net, rate=drop_rate, training=is_training, name='pool1_dropout')
+
+    # Extract higher-level features (specific combinations of absorption and emission lines)
+    # Input: 10 x 4, outputs: 10 x 8, weights: 4 x 10 x 8 = 320
+    net = conv1d(net, 8, 10, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    # Input: 10 x 8, outputs: 5 x 8, weights: 0
+    net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool2')
+    net = dropout(net, rate=drop_rate, training=is_training, name='pool2_dropout')
+
+    # Input: 5 x 8
+    net = flatten(net, name='flatten')
+    # Input: 40 x 1, outputs: 8 x 1, weights: 40 x 8 = 320
+    net = dense(net, 8, activation=relu, name='fc1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    net = dropout(net, rate=drop_rate, training=is_training, name='fc1_dropout')
+    # Input: 8 x 1, outputs: 2 x 1, weights: 16
+    logits = dense(net, num_classes, name='fc2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    return logits, x
+
+
+def logBin3Conv2Dense(x, num_classes, is_training, drop_rate, l2_scale):
+    # Extract low-level features (individual absorption and emission lines)
+    # Input: 100 x 1, outputs: 90 x 4, weights: 1 x 10 x 4 = 40
+    net = conv1d(x, 4, 10, strides=1, data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    # Input: 90 x 4, outputs: 45 x 4, weights: 0
+    net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool1')
+    net = dropout(net, rate=drop_rate, training=is_training, name='pool1_dropout')
+
+    # Extract higher-level features (specific combinations of absorption and emission lines)
+    # Input: 45 x 4, outputs: 20 x 8, weights: 4 x 10 x 8 = 320
+    net = conv1d(net, 8, 10, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    # Input: 20 x 8, outputs: 10 x 8, weights: 0
+    net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool2')
+    net = dropout(net, rate=drop_rate, training=is_training, name='pool2_dropout')
+
+    # Extract more higher-level features (specific combinations of absorption and emission lines)
+    # Input: 10 x 8, outputs: 10 x 16, weights: 8 x 5 x 16 = 640
+    net = conv1d(net, 16, 5, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv3', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    # Input: 10 x 16, outputs: 5 x 16, weights: 0
+    net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool3')
+    net = dropout(net, rate=drop_rate, training=is_training, name='pool3_dropout')
+
+    # Input: 5 x 16
+    net = flatten(net, name='flatten')
+    # Input: 80 x 1, outputs: 8 x 1, weights: 80 x 8 = 640
+    net = dense(net, 8, activation=relu, name='fc1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    net = dropout(net, rate=drop_rate, training=is_training, name='fc1_dropout')
+    # Input: 8 x 1, outputs: 2 x 1, weights: 16
+    logits = dense(net, num_classes, name='fc2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    return logits, x
+
+
 def verySmall1DCNN(x, num_classes, is_training, drop_rate, l2_scale):
     # Channels refers to flux/ivar (2 channels), or if adaptive smoothing, a single channel.
     # Smoothing layer (only 1 filter), not learning features in this layer.
@@ -258,7 +320,7 @@ def printNetworkInfo(model, print_weights=False):
 # Assumes labels follows the onehot style.
 def modelFn(features, labels, mode, params):
     is_training = (mode == tf.estimator.ModeKeys.TRAIN)
-    logits, x = verySmall1DCNN(x=features['features'], 
+    logits, x = logBin2Conv2Dense(x=features['features'], 
                             num_classes=params['num_classes'], 
                             is_training=is_training,
                             drop_rate=params['drop_rate'],
@@ -443,7 +505,10 @@ def trainModel(train_metadata, dev_metadata, learning_rate, batch_size, drop_rat
     best_cp_index = bestCheckpointIndex(checkpoint_tracker)
     cp_path, cp_dev_loss, cp_dev_acc = checkpoint_tracker[best_cp_index]
 
-    results['accurate_runs'].append((cp_dev_acc, 'dev_acc: {:.3f} batch_size: {} learn_rate: {:.4f} drop_rate: {:.2f} l2_scale: {:.2f} cp_path: {}'.format(cp_dev_acc, batch_size, learning_rate, drop_rate, l2_scale, cp_path)))
+    elapsed_time = time.time() - start_time
+    elapsed_hours = int(elapsed_time / 3600)
+    elapsed_minutes = int((elapsed_time - (elapsed_hours * 3600)) / 60)
+    results['accurate_runs'].append((cp_dev_acc, 'dev_acc: {:.3f} batch_size: {} learn_rate: {:.4f} drop_rate: {:.3f} l2_scale: {:.3f} cp_path: {} ({} epochs, {} hours {} mins)'.format(cp_dev_acc, batch_size, learning_rate, drop_rate, l2_scale, cp_path, epoch+1, elapsed_hours, elapsed_minutes)))
 
     print('\nRUN RESULTS: {}'.format(results['accurate_runs'][-1][1]))
 
@@ -471,13 +536,10 @@ def trainModel(train_metadata, dev_metadata, learning_rate, batch_size, drop_rat
         print(matrix_to_print)
 
     # Print network info. This uses latest checkpoint, so delete extra checkpoints after this.
-    printNetworkInfo(model, True)
+    printNetworkInfo(model)
     deleteExtraCheckpoints(cp_path)
 
-    elapsed_time = time.time() - start_time
-    elapsed_hours = int(elapsed_time / 3600)
-    elapsed_minutes = int((elapsed_time - (elapsed_hours * 3600)) / 60)
-    print('\nEND LEARNING_RATE: {}, BATCH_SIZE: {}, DROP_RATE: {}, L2_SCALE: {} ({} epochs, {} hours {} mins)'.format(learning_rate, batch_size, drop_rate, l2_scale, epoch+1, elapsed_hours, elapsed_minutes))
+    print('\nEND LEARNING_RATE: {}, BATCH_SIZE: {}, DROP_RATE: {}, L2_SCALE: {}'.format(learning_rate, batch_size, drop_rate, l2_scale))
     print('==========================================================================')
 
 
@@ -504,10 +566,10 @@ if __name__=='__main__':
     # hyperparameters should be optimized using the dev set.
     # High learning rates cause error/accuracy to jump around and interfere with early stopping,
     # but strong regularization seems to help.
-    LEARNING_RATES = [3e-4, 1e-3]
+    LEARNING_RATES = [4e-4, 2e-4]
     BATCH_SIZES = [32]
-    DROP_RATES = [0.01, 0.03]
-    L2_SCALES = [0.01, 0.03]
+    DROP_RATES = [0.01, 0.005]
+    L2_SCALES = [0.01, 0.003]
 
     if ARGS.adaptive:
         print('Will use adaptive gaussian smoothing using ivar and flux.')
