@@ -4,7 +4,7 @@
 Uses Estimator (new eager execution style).
 
 To protect from being killed by terminal closing:
-nohup $SHELL -c "python3 -u tf_trainer.py [-a True] 2>&1 | grep --line-buffered -v gpu_device.cc > ../logs/training.log" &
+nohup $SHELL -c "python3 -u tf_trainer.py [-a True] [-l 100] 2>&1 | grep --line-buffered -v gpu_device.cc > ../logs/training.log" &
 tail -f ../logs/training.log
 
 Works with TF v1.8 GPU, not with v1.9, as of 7/14/18.
@@ -38,6 +38,9 @@ NONSTAR_DIR = 'nonstar'
 # Use onehot style
 STAR_LABEL = [0, 1]
 NONSTAR_LABEL = [1, 0]
+# Limit the lambda values to this region, as flux at extreme values tends to be very noisy.
+MIN_BIN_LAMBDA=5200
+MAX_BIN_LAMBDA=9500
 
 # If specified, checkpoints are automatically saved to subdirs within this dir.
 # Be careful that different training runs (different hyperparameters) don't load
@@ -47,7 +50,7 @@ NONSTAR_LABEL = [1, 0]
 MODEL_DIR = HOME_DIR + '/models'
 #MODEL_DIR = None
 
-NUM_EPOCHS = 200  # max epochs
+MAX_NUM_EPOCHS = 200  # max epochs
 SHUFFLE_BUFFER = 10000
 
 NUM_CHECKPOINTS_SAVED = 20
@@ -55,6 +58,7 @@ NUM_CHECKPOINTS_SAVED = 20
 # expressed as a percentage.
 ES_MIN_GENERALIZATION_LOSS = 1.0
 ES_MIN_PROGRESS_QUOTIENT = 0.4
+ES_MIN_EPOCHS = 20
 
 # from tensorflow.layers import ...
 # We learn weights for these:
@@ -62,6 +66,7 @@ conv1d = tf.layers.conv1d
 dense = tf.layers.dense
 # No weights for these:
 dropout = tf.layers.dropout
+average_pooling1d = tf.layers.average_pooling1d
 max_pooling1d = tf.layers.max_pooling1d
 flatten = tf.layers.flatten
 relu = tf.nn.relu
@@ -97,9 +102,10 @@ def featuresFromFits(filepath):
         # distance between any known emission/absorption features is the same irrespective of
         # amount of redshift (z). Also re-bin the flux into a smaller number of pixels.
         smoothed_flux = adaptiveSmoothing(spec.flux, spec.ivar)
-        flux, lam = logBinPixels(ARGS.loglam, spec.lam, smoothed_flux)
+        flux, loglam = logBinPixels(ARGS.loglam, spec.lam, smoothed_flux, min_lam=MIN_BIN_LAMBDA, max_lam=MAX_BIN_LAMBDA)
         log_binned_flux = np.float32(standardize(flux))
         return log_binned_flux.reshape((len(log_binned_flux), 1))
+        #return np.transpose(np.array([log_binned_flux, loglam]))
     else:
         # Make both raw ivar and flux as channels.
         flux = cleanValues(spec.flux)
@@ -158,20 +164,20 @@ def datasetFromFitsDirectory(directory_path, load_fraction=1.0):
 
 def logBin2Conv2Dense(x, num_classes, is_training, drop_rate, l2_scale):
     # Extract low-level features (individual absorption and emission lines)
-    # Input: 20 x 1, outputs: 20 x 4, weights: 1 x 10 x 4 = 40
-    net = conv1d(x, 4, 10, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
-    # Input: 20 x 4, outputs: 10 x 4, weights: 0
+    # Input: 70 x 1, outputs: 60 x 8, weights: 1 x 10 x 8 = 80
+    net = conv1d(x, 8, 10, strides=1, padding='valid', data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    # Input: 60 x 8, outputs: 30 x 8, weights: 0
     net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool1')
     net = dropout(net, rate=drop_rate, training=is_training, name='pool1_dropout')
 
     # Extract higher-level features (specific combinations of absorption and emission lines)
-    # Input: 10 x 4, outputs: 10 x 8, weights: 4 x 10 x 8 = 320
-    net = conv1d(net, 8, 10, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
-    # Input: 10 x 8, outputs: 5 x 8, weights: 0
+    # Input: 30 x 8, outputs: 30 x 16, weights: 8 x 10 x 16 = 1280
+    net = conv1d(net, 16, 10, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    # Input: 30 x 16, outputs: 15 x 16, weights: 0
     net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool2')
     net = dropout(net, rate=drop_rate, training=is_training, name='pool2_dropout')
 
-    # Input: 5 x 8
+    # Input: 15 x 16
     net = flatten(net, name='flatten')
     # Input: 40 x 1, outputs: 8 x 1, weights: 40 x 8 = 320
     net = dense(net, 8, activation=relu, name='fc1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
@@ -320,7 +326,7 @@ def printNetworkInfo(model, print_weights=False):
 # Assumes labels follows the onehot style.
 def modelFn(features, labels, mode, params):
     is_training = (mode == tf.estimator.ModeKeys.TRAIN)
-    logits, x = logBin2Conv2Dense(x=features['features'], 
+    logits, x = medium1DCNN(x=features['features'], 
                             num_classes=params['num_classes'], 
                             is_training=is_training,
                             drop_rate=params['drop_rate'],
@@ -378,7 +384,7 @@ def bestCheckpointIndex(checkpoint_tracker):
 # TODO: Better early stopping. See https://github.com/tensorflow/tensorflow/issues/18394
 # (the feature will be released in TF 1.10).
 def shouldStopEarly(training_accuracies, training_losses, dev_accuracies, dev_losses, epoch):
-    if epoch < 10:
+    if epoch < ES_MIN_EPOCHS:
         # Clearly too early to stop training
         return False
     lowest_dev_loss = np.min(dev_losses[0:epoch+1])
@@ -423,7 +429,7 @@ def trainModel(train_metadata, dev_metadata, learning_rate, batch_size, drop_rat
 
     # The training dataset needs to last for all epochs, for use with one_shot_iterator.
     train_dataset = train_metadata['dataset']
-    train_dataset = train_dataset.shuffle(SHUFFLE_BUFFER).repeat(NUM_EPOCHS).batch(batch_size)
+    train_dataset = train_dataset.shuffle(SHUFFLE_BUFFER).repeat(MAX_NUM_EPOCHS).batch(batch_size)
 
     # Returns features, label each time it is called.
     def trainInputFn():
@@ -473,11 +479,11 @@ def trainModel(train_metadata, dev_metadata, learning_rate, batch_size, drop_rat
     checkpoint_tracker = []
 
     # Train
-    training_accuracies = np.zeros(NUM_EPOCHS)
-    training_losses = np.zeros(NUM_EPOCHS)
-    dev_accuracies = np.zeros(NUM_EPOCHS)
-    dev_losses = np.zeros(NUM_EPOCHS)
-    for epoch in range(NUM_EPOCHS):
+    training_accuracies = np.zeros(MAX_NUM_EPOCHS)
+    training_losses = np.zeros(MAX_NUM_EPOCHS)
+    dev_accuracies = np.zeros(MAX_NUM_EPOCHS)
+    dev_losses = np.zeros(MAX_NUM_EPOCHS)
+    for epoch in range(MAX_NUM_EPOCHS):
         model.train(input_fn=trainInputFn,
                     steps=num_steps_in_epoch)
 
@@ -488,7 +494,7 @@ def trainModel(train_metadata, dev_metadata, learning_rate, batch_size, drop_rat
         latest_train_loss = np.asscalar(eval_of_train['loss'])
         latest_dev_acc = np.asscalar(eval_of_dev['accuracy'])
         latest_dev_loss = np.asscalar(eval_of_dev['loss'])
-        print("Epoch: {:02d}/{} => Train Loss: {:.3f}, Dev Loss: {:.3f}. Train Acc: {:.3f}, Dev Acc: {:.3f}".format(epoch+1, NUM_EPOCHS, latest_train_loss, latest_dev_loss, latest_train_acc, latest_dev_acc))
+        print("Epoch: {:02d}/{} => Train Loss: {:.3f}, Dev Loss: {:.3f}. Train Acc: {:.3f}, Dev Acc: {:.3f}".format(epoch+1, MAX_NUM_EPOCHS, latest_train_loss, latest_dev_loss, latest_train_acc, latest_dev_acc))
         
         training_accuracies[epoch] = latest_train_acc
         training_losses[epoch] = latest_train_loss
@@ -568,11 +574,18 @@ if __name__=='__main__':
     # but strong regularization seems to help.
     LEARNING_RATES = [4e-4, 2e-4]
     BATCH_SIZES = [32]
-    DROP_RATES = [0.01, 0.005]
-    L2_SCALES = [0.01, 0.003]
+    #DROP_RATES = [0.01, 0.005]  # Use with logbinned
+    DROP_RATES = [0.2, 0.25]  # Use with full 8k
+    #L2_SCALES = [0.001, 0.003]  # Use with logbinned
+    L2_SCALES = [0.1, 0.05]  # Use with full 8k
 
     if ARGS.adaptive:
         print('Will use adaptive gaussian smoothing using ivar and flux.')
+    elif ARGS.loglam:
+        print('Will use adaptive gaussian smoothing using ivar and flux, and binning by log(lambda).')
+        ES_MIN_EPOCHS = 40
+    else:
+        print('Will use raw ivar and flux channels.')
 
     print('\nStarting at datetime: {}'.format(str(datetime.now())))
 
