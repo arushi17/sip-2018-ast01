@@ -221,3 +221,44 @@ def logBinPixels(num_pix, lam, flux, min_lam=0, max_lam=0):
             # print('adj_spec: {}'.format(adj_spec[bound])) # TESTING
     return np.float32(adj_spec), np.float32(bin_bound)
 
+
+# Data loading code used by Tensorflow. Load from a given .fits file.
+# - Use Spectrum class to load flux and ivar into numpy arrays.
+# - Standardize each series. Optionally truncate outlier ivar values.
+# If adaptive smoothing, returns a numpy array of 8kx1 dimension (float32)
+# Otherwise returns a numpy array of 8kx2 dimension
+# TODO: Need to check for invalid ivar and reject the fits file.
+def featuresFromFits(filepath, ARGS, min_bin_lambda=0, max_bin_lambda=0):
+    print('Reading file {}'.format(filepath))
+    spec = Spectrum(filepath)
+    if ARGS.adaptive:
+        # We have only one channel, smoothed flux.
+        smoothed_flux = np.float32(standardize(adaptiveSmoothing(spec.flux, spec.ivar)))
+        return smoothed_flux.reshape((len(smoothed_flux), 1))
+    elif ARGS.loglam:
+        # We have only one channel, smoothed flux. Also stretch/compress it so that pixel
+        # distance between any known emission/absorption features is the same irrespective of
+        # amount of redshift (z). Also re-bin the flux into a smaller number of pixels.
+        smoothed_flux = adaptiveSmoothing(spec.flux, spec.ivar)
+        flux, loglam = logBinPixels(ARGS.loglam, spec.lam, smoothed_flux, min_lam=min_bin_lambda, max_lam=max_bin_lambda)
+        log_binned_flux = np.float32(standardize(flux))
+        return log_binned_flux.reshape((len(log_binned_flux), 1))
+        #return np.transpose(np.array([log_binned_flux, loglam]))
+    else:
+        # Make both raw ivar and flux as channels.
+        flux = cleanValues(spec.flux)
+        # TODO: Try just scaling flux from 0 to 1
+        flux = np.float32(standardize(flux))
+
+        ivar = cleanValues(spec.ivar)
+        ivar = np.sqrt(ivar)
+        ivar = limitOutliers(ivar, 2.5)
+        # TODO: ivar of 0 has a special meaning (don't trust the flux)
+        # ivar = scale(ivar, 0, 1.0)
+        ivar = np.float32(standardize(ivar))
+
+        if flux.shape != ivar.shape:
+            raise ValueError(filepath + ': flux.shape: ' + flux.shape + ', ivar.shape: ' + ivar.shape)
+        # Channels should be last for most tf layers
+        return np.transpose(np.array([flux, ivar]))
+
