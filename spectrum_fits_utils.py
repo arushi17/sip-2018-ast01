@@ -85,12 +85,12 @@ def scale(series, min_scale, max_scale):
 def determineWindowSize(ivar, i, smooth_val):
     if smooth_val == 'adaptive':
         # 15 pixel window
-        avg_ivar = np.mean(ivar[i-7:i+7])
+        avg_ivar = np.mean(ivar[i-7:i+8])
         if avg_ivar >= 0.4:
             return 15
 
         # 31 pixel window
-        avg_ivar = np.mean(ivar[i-15:i+15])
+        avg_ivar = np.mean(ivar[i-15:i+16])
         if avg_ivar >= 0.3:
             return 31
 
@@ -124,19 +124,22 @@ def gaussianWeightedIvar(window_size, ivar, i):
     weighted_ivar = np.multiply(gweights, ivar_slice)
     sum_of_weights = np.sum(weighted_ivar)
     if math.isnan(sum_of_weights) or sum_of_weights == 0:
-        # Forget about modulating by ivar values. Stick with default gaussian.
+        # Forget about modulating by ivar values.
+        # TODO: Should output flux be zero instead, if we can't trust it?
+        # return np.zeros(window_size)
         return gweights
     else:
         return weighted_ivar / sum_of_weights
 
 # returns a single adapted flux value
 def convolutionFlux(flux, window_size, weighted_ivar, i):
-    slice_min = int(i - ((window_size-1) / 2))
-    slice_max = int(i + ((window_size+1) / 2))
+    step_size = (window_size - 1) / 2
+    slice_min = int(i - step_size)
+    slice_max = int(i + step_size + 1)
     if (slice_max - slice_min != window_size):
         print('ERROR: window_size: {}, i: {}, slice_min: {}, slice_max: {}'.format(window_size, i, slice_min, slice_max))
     flux_slice = flux[slice_min:slice_max]
-    return np.asscalar(np.convolve(flux_slice, weighted_ivar, mode='valid'))
+    return np.asscalar(np.convolve(np.flip(flux_slice, axis=0), weighted_ivar, mode='valid'))
 
 # returns a numpy array containing smoothed flux, size 8k
 def adaptiveSmoothing(flux_in, ivar_in, smooth_val='adaptive'):
@@ -151,8 +154,11 @@ def adaptiveSmoothing(flux_in, ivar_in, smooth_val='adaptive'):
         window_size = determineWindowSize(ivar, i, smooth_val)
         histogram[window_size] = histogram[window_size] + 1
         weighted_ivar = gaussianWeightedIvar(window_size, ivar, i)
+        weighted_ivar_sum = np.sum(weighted_ivar)
+        if not math.isclose(1.0, weighted_ivar_sum, rel_tol=0.02):
+            print('Warning: weighted ivar of {} != 1.0'.format(weighted_ivar_sum))
         smoothed_flux[i - 30] = convolutionFlux(flux, window_size, weighted_ivar, i)
-    
+
     print('histogram of window sizes: ')
     print(histogram)
 
@@ -168,33 +174,50 @@ def logLamConvert(lam):
             loglam[i] = np.log(lam[i])
     return loglam
 
-# returns flux and wavelengths of a spectrum converted to a desired number of pixels, adjusted to log scale
-def logBinPixels(num_pix, lam, flux):
+# returns flux and wavelengths of a spectrum converted to a desired number of pixels,
+# with x-axis binned by lambda adjusted to log scale. So, at the blue end of the spectrum
+# we may have 30 pixels binned into a single output pixel, while at the red end we may
+# have 60. Effectively stretches the spectrum at the blue end, shrinks at the red end.
+# The returned log(lambda) values represent the upper limit of each bin.
+# Best to use this after adaptive smoothing.
+# Since there is likely some benefit of fixing log(lam) to x-axis position/pixel mapping
+# across all spectra, caller can supply non-zero min_lam and max_lam values (in Angtroms).
+# Wavelengths below min_lam (and their flux) will be dropped; similarly for max_lam.
+def logBinPixels(num_pix, lam, flux, min_lam=0, max_lam=0):
     # determine how many log(lam) each pixel in adjusted image should cover
     # Find the first non-zero lambda value at each end.
-    for i in range(len(lam)):
-        if lam[i] > 0:
-            min_loglam = math.log(lam[i])
-            break
-    for i in range(len(lam)-1, -1, -1):
-        if lam[i] > 0:
-            max_loglam = math.log(lam[i])
-            break
-    pix_width = (max_loglam - min_loglam) / num_pix
+    if min_lam > 0:
+        min_loglam = math.log(min_lam)
+    else:
+        for i in range(len(lam)):
+            if lam[i] > 0:
+                min_loglam = math.log(lam[i])
+                break
+    if max_lam > 0:
+        max_loglam = math.log(max_lam)
+    else:
+        for i in range(len(lam)-1, -1, -1):
+            if lam[i] > 0:
+                max_loglam = math.log(lam[i])
+                break
+
     # create array of boundaries for pixel bins in terms of log(lam), stores upper boundary
+    pix_width = (max_loglam - min_loglam) / num_pix
     bin_bound = np.zeros(num_pix)
     for i in range(num_pix):
-        logspace_boundary = min_loglam + pix_width * (i + 1)
-        bin_bound[i] = logspace_boundary
+        bin_bound[i] = min_loglam + pix_width * (i + 1)
+
     # go through lam array and fill pixel bins by taking mean of all below the boundary
     adj_spec = np.zeros(num_pix)
-    end_pix = 0
+    lam_end_pix = 0
     for bound in range(num_pix):
-        start_pix = end_pix
-        while end_pix < len(flux) and lam[end_pix] < math.exp(bin_bound[bound]): 
-            end_pix += 1
-        if end_pix > start_pix:
-            slice_flux = flux[start_pix:end_pix]
-            adj_spec[bound] = np.mean(slice_flux)
-    return adj_spec, bin_bound
-        
+        lam_start_pix = lam_end_pix
+        while lam_end_pix < len(lam) and lam[lam_end_pix] <= math.exp(bin_bound[bound]): 
+            lam_end_pix += 1
+        # print('bound: {}, lam_start_pix: {}, lam_end_pix: {}'.format(bound, lam_start_pix, lam_end_pix)) # TESTING
+        if lam_end_pix > lam_start_pix:
+            # lam_end_pix now points to 1 beyond the range we want
+            adj_spec[bound] = np.mean(flux[lam_start_pix:lam_end_pix])
+            # print('adj_spec: {}'.format(adj_spec[bound])) # TESTING
+    return np.float32(adj_spec), np.float32(bin_bound)
+
