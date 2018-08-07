@@ -41,42 +41,44 @@ def gaussianAndSave(input_path, outputPath, smooth_type, smooth_val, plot_type):
     # uses other functions to perform user's specified smoothing
     if smooth_type == 'sigma' and smooth_val != 'none':
         # generates spectrum with regular gaussian smoothing, sigma specified
-        series = regularSigmaGaussianAndSave(spec, plot_type, smooth_val)
+        series = regularSigmaGaussian(spec, plot_type, smooth_val)
         series.plot(figsize=(10,6))
     elif smooth_type == 'adaptive':
         # generates spectrum with adaptive smoothing on flux
-        series = adaptiveGaussianAndSave(spec, smooth_val)
+        series = adaptiveGaussian(spec, smooth_val)
         series.plot(figsize=(10,6))
     elif smooth_type == 'window':
         # generates spectrum with adaptive smoothing on flux with fixed window size
-        series = fixedWindowAdaptiveGaussianAndSave(spec, smooth_val)
+        series = fixedWindowAdaptiveGaussian(spec, smooth_val)
         series.plot(figsize=(10,6))
     else:    
         # default, generates normal raw spectrum
-        series, series_ivar = defaultGaussianAndSave(spec, plot_type, fig)
-        if series_ivar:
+        series, series_ivar = defaultGaussian(spec, plot_type, fig)
+        if not series_ivar.empty:
+            series.plot(figsize=(10,6))
             series_ivar.plot()
-        series.plot(figsize=(10,6))
+        else:
+            series.plot(figsize=(10,6))
         #TODO: fig.legend((series_ivar, series), ('ivar', 'flux'), 'upper left')
 
     # plots main series and saves png
     pyplot.savefig(outputPath)
     pyplot.close(fig)
 
-# gaussianAndSave function for default parameters, generates raw spectrum
-def defaultGaussianAndSave(spec, plot_type, fig):
-    series_ivar = None
+# gaussian function for default parameters, generates raw spectrum
+def defaultGaussian(spec, plot_type, fig):
+    series_ivar = Series([])
     if plot_type == 'flux':
         series = Series(spec.flux, spec.lam)
     elif plot_type == 'ivar':
         series = Series(spec.ivar, spec.lam)
     else:
-        series = Series(scale(cleanAndLimit(spec.flux, 0), 0, 1), spec.lam)
-        series_ivar = Series(scale(cleanAndLimit(spec.ivar, 2.5), 0, 1), spec.lam)
+        series = Series(scale(cleanValues(spec.flux), 0, 1), spec.lam)
+        series_ivar = Series(scale(limitOutliers(cleanValues(spec.ivar), 2.5), 0, 1), spec.lam)
     return series, series_ivar
 
-# gaussianAndSave function for regular gaussian smoothing, sigma specified
-def regularSigmaGaussianAndSave(spec, plot_type, smooth_val):
+# gaussian function for regular gaussian smoothing, sigma specified
+def regularSigmaGaussian(spec, plot_type, smooth_val):
     cleaned_flux, cleaned_ivar = cleanFluxIvar(spec.flux, spec.ivar)
     if plot_type == 'flux':
         smoothed_flux = gaussianSmoothing(int(smooth_val), cleaned_flux)
@@ -90,15 +92,15 @@ def regularSigmaGaussianAndSave(spec, plot_type, smooth_val):
         series_ivar.plot()
     return series
 
-# gaussianAndSave function for adaptive smoothing on flux
-def adaptiveGaussianAndSave(spec, smooth_val):
-    print('adaptiveGaussianAndSave reached') # testing
+# gaussian function for adaptive smoothing on flux
+def adaptiveGaussian(spec, smooth_val):
+    print('adaptiveGaussian reached') # testing
     smoothed_flux = adaptiveSmoothing(spec.flux, spec.ivar, smooth_val)
     series = Series(smoothed_flux, spec.lam)
     return series
 
-# gaussianAndSave function for adaptive smoothing on flux with fixed window sizE
-def fixedWindowAdaptiveGaussianAndSave(spec, smooth_val):
+# gaussian function for adaptive smoothing on flux with fixed window sizE
+def fixedWindowAdaptiveGaussian(spec, smooth_val):
     smoothed_flux = adaptiveSmoothing(spec.flux, spec.ivar, smooth_val) 
     series = Series(smoothed_flux, spec.lam)
     return series
@@ -121,7 +123,7 @@ def parserInput():
     parser.add_argument('-s', '--sigma', type=str, default='none', help='Sigma to be used in regular gaussian smoothing, "none" (default) if no smoothing.')
     parser.add_argument('-a', '--adaptive', type=str, default='none', help='"adaptive" if adaptive smoothing, "none" (default) if no adaptive smoothing, only performed on flux.')
     parser.add_argument('-w', '--window', type=str, default='0', help='"15", "31", or "61" set window for adaptive smoothing, "0" (default) if no specified window.')
-    parser.add_argument('-p', '--plotType', type=str, default='flux', help='"flux" (default)  if only flux plotted, "ivar" if only ivar plotted, "both" if both plotted (will be scaled).')
+    parser.add_argument('-p', '--plotType', type=str, default='flux', help='"flux" (default)  if only flux plotted, "ivar" if only ivar plotted, "both" if both plotted (will be scaled 0-1).')
     parser.add_argument('-l', '--logbin', type=str, default='0', help='Pixel size to adjust image to, using binning on a log lambda scale.')
     args = parser.parse_args()
     print(args) # TESTING
@@ -178,7 +180,5 @@ if __name__=='__main__':
             print('default') # testing
             output = outputPath(filename, 'sigma', 'none', args.plotType)
             gaussianAndSave(filename, output, 'sigma', 'none', args.plotType)
-
-        print('figures still open: ' + str(pyplot.get_fignums())) # TESTING
 
     print('number of fits files converted: ' + str(count)) # TESTING
