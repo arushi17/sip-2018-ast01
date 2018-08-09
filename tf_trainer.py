@@ -309,6 +309,34 @@ def logBin5Conv2Dense(x, is_training, params):
     return logits, x
 
 
+# Expects full 8k input width (adaptive smoothing), looks for patterns like CA triplet.
+def veryWideCNN(x, is_training, params):
+    num_classes = params['num_classes']
+    drop_rate = params['drop_rate']
+    l2_scale = params['l2_scale']
+    conv1_width = params['conv1_width']
+
+    # Input: 8k x 1, outputs: 8188 x 2
+    net = conv1d(x, 2, 7, strides=1, padding='valid', data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool1')
+    net = dropout(net, rate=drop_rate, training=is_training, name='pool1_dropout')
+
+    # Input: 4144 x 1, outputs: ~ 3900 x 1
+    net = conv1d(x, 1, conv1_width, strides=1, padding='valid', data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    # Input: 3900 x 1, outputs: ~ 1950 x 1
+    net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool2')
+    net = dropout(net, rate=drop_rate, training=is_training, name='pool2_dropout')
+
+    # Only 1 output
+    net = max_pooling1d(net, 1800, 1500, data_format='channels_last', name='pool_wide')
+
+    # Input: 1 x 1
+    net = flatten(net, name='flatten')
+    # Input: 1 x 1, outputs: 2 x 1, weights: 16
+    logits = dense(net, num_classes, name='fc1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    return logits, x
+
+
 def verySmall1DCNN(x, is_training, params):
     num_classes = params['num_classes']
     drop_rate = params['drop_rate']
@@ -428,7 +456,8 @@ def printNetworkInfo(model, print_weights=False):
 # Assumes labels follows the onehot style.
 def modelFn(features, labels, mode, params):
     is_training = (mode == tf.estimator.ModeKeys.TRAIN)
-    logits, x = logBin5Conv2Dense(
+    # Change network model here
+    logits, x = veryWideCNN(
                 features['features'], 
                 is_training,
                 params)
@@ -523,9 +552,11 @@ def deleteExtraCheckpoints(cp_path):
                 pass
 
 
-def trainModel(train_metadata, dev_metadata, train_params, results):
+def trainModel(train_metadata, dev_metadata, params, results):
+    batch_size = params['batch_size']
+    conv1_width = params['conv1_width']
     print('==========================================================================')
-    print('\nBEGIN LEARNING_RATE: {}, BATCH_SIZE: {}, DROP_RATE: {}, L2_SCALE: {}'.format(learning_rate, batch_size, drop_rate, l2_scale))
+    print('\nBEGIN LEARNING_RATE: {}, BATCH_SIZE: {}, DROP_RATE: {}, L2_SCALE: {}, CONV1_WIDTH: {}'.format(learning_rate, batch_size, drop_rate, l2_scale, conv1_width))
     start_time = time.time()
 
     # The training dataset needs to last for all epochs, for use with one_shot_iterator.
@@ -568,7 +599,7 @@ def trainModel(train_metadata, dev_metadata, train_params, results):
     # Build
     model = tf.estimator.Estimator(
         modelFn,
-        params=train_params,
+        params=params,
         model_dir=model_save_dir,
         config=my_checkpointing_config)
 
@@ -611,7 +642,7 @@ def trainModel(train_metadata, dev_metadata, train_params, results):
     elapsed_time = time.time() - start_time
     elapsed_hours = int(elapsed_time / 3600)
     elapsed_minutes = int((elapsed_time - (elapsed_hours * 3600)) / 60)
-    results['accurate_runs'].append((cp_dev_acc, 'dev_acc: {:.3f} batch_size: {} learn_rate: {:.4f} drop_rate: {:.3f} l2_scale: {:.3f} cp_path: {} ({} epochs, {} hours {} mins)'.format(cp_dev_acc, batch_size, learning_rate, drop_rate, l2_scale, cp_path, epoch+1, elapsed_hours, elapsed_minutes)))
+    results['accurate_runs'].append((cp_dev_acc, 'dev_acc: {:.3f} batch_size: {} learn_rate: {:.4f} drop_rate: {:.3f} l2_scale: {:.3f} conv1_width: {} cp_path: {} ({} epochs, {} hours {} mins)'.format(cp_dev_acc, batch_size, learning_rate, drop_rate, l2_scale, conv1_width, cp_path, epoch+1, elapsed_hours, elapsed_minutes)))
 
     print('\nRUN RESULTS: {}'.format(results['accurate_runs'][-1][1]))
 
@@ -639,10 +670,9 @@ def trainModel(train_metadata, dev_metadata, train_params, results):
         print(matrix_to_print)
 
     # Print network info. This uses latest checkpoint, so delete extra checkpoints after this.
-    printNetworkInfo(model)
+    printNetworkInfo(model, True)
     deleteExtraCheckpoints(cp_path)
 
-    print('\nEND LEARNING_RATE: {}, BATCH_SIZE: {}, DROP_RATE: {}, L2_SCALE: {}'.format(learning_rate, batch_size, drop_rate, l2_scale))
     print('==========================================================================')
 
 
@@ -671,13 +701,14 @@ if __name__=='__main__':
     # but strong regularization seems to help.
     LEARNING_RATES = [4e-4, 2e-4]
     BATCH_SIZES = [32]
-    DROP_RATES = [0.02, 0.01, 0.005, 0]  # Use with logbinned, conv
+    DROP_RATES = [0.02, 0.01, 0.005]  # Use with logbinned, conv
     #DROP_RATES = [0.1, 0.01, 0]  # Use with logbinned, fully connected
     #DROP_RATES = [0.2, 0.25]  # Use with full 8k
     # L2_SCALE cannot be 0
-    L2_SCALES = [0.004, 0.002, 0.001]  # Use with logbinned, conv
+    L2_SCALES = [0.004, 0.002]  # Use with logbinned, conv
     #L2_SCALES = [0.001, 0.01, 0.1]  # Use with logbinned, fully connected
     #L2_SCALES = [0.1, 0.05]  # Use with full 8k
+    CONV1_WIDTH = [300, 500]
 
     if ARGS.adaptive:
         print('Will use adaptive gaussian smoothing using ivar and flux.')
@@ -686,6 +717,10 @@ if __name__=='__main__':
         ES_MIN_EPOCHS = 40
     else:
         print('Will use raw ivar and flux channels.')
+
+    # Adjust early stopping min epochs up if we are given a smaller dataset, to make sure
+    # we train for a similar number of steps at least.
+    ES_MIN_EPOCHS /= ARGS.fraction
 
     print('\nStarting at datetime: {}'.format(str(datetime.now())))
 
@@ -696,9 +731,9 @@ if __name__=='__main__':
     results = {'incorrect': {},
                'accurate_runs' : [],
               }
-    combinations = list(itertools.product(LEARNING_RATES, BATCH_SIZES, DROP_RATES, L2_SCALES))
+    combinations = list(itertools.product(LEARNING_RATES, BATCH_SIZES, DROP_RATES, L2_SCALES, CONV1_WIDTH))
     random.shuffle(combinations)
-    for (learning_rate, batch_size, drop_rate, l2_scale) in combinations:
+    for (learning_rate, batch_size, drop_rate, l2_scale, conv1_width) in combinations:
         train_params={
                 # Fixed params:
                 'num_classes': 2,
@@ -709,6 +744,7 @@ if __name__=='__main__':
                 'batch_size': batch_size,
                 'drop_rate': drop_rate,
                 'l2_scale': l2_scale,
+                'conv1_width': conv1_width,
                 }
         trainModel(train_metadata, dev_metadata, train_params, results)
 
