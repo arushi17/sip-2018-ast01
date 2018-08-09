@@ -10,10 +10,22 @@ from matplotlib import pyplot
 from scipy import ndimage
 import argparse
 import math
+import os.path
 import sys
 from spectrum_fits_utils import *
 
+# Truncation of x-axis while using log(lam) binning:
+MIN_BIN_LAMBDA=5200
+MAX_BIN_LAMBDA=9500
+
+FLUX_COLOR='blue'
+IVAR_COLOR='orange'
+LINE_WIDTH=0.5
+
 # output path based on input path
+# smooth_type should be adaptiveSmoothing, logbin, windowSize, or sigma.
+# smooth_val should be either a (str) odd whole number or 'none' or 'adaptive'.
+# plot_type should be flux, ivar, or both.
 def outputPath(input_path, smooth_type, smooth_val, plot_type):
     file = input_path[:-5]
     if smooth_val == 'none':
@@ -23,7 +35,7 @@ def outputPath(input_path, smooth_type, smooth_val, plot_type):
         elif plot_type == 'ivar':
             output = file + '_rawIvar.png'
         else:
-            output = file + '_rawFluxIvar.png'
+            output = file + '_scaledFluxIvar.png'
     elif smooth_type == 'adaptiveSmoothing':
         output = file + '_' + smooth_type + '.png'
     elif smooth_type == 'logbin':
@@ -33,49 +45,71 @@ def outputPath(input_path, smooth_type, smooth_val, plot_type):
     return output
 
 # uses spectrum_fits_utils to apply gaussian smoothing to flux array, save it as a series object with .png
+# smooth_type should be adaptive, logbin, window, or sigma.
 def gaussianAndSave(input_path, outputPath, smooth_type, smooth_val, plot_type):
     print('input path: ' + input_path, 'output path: ' + outputPath, 'smoothing type: ' + smooth_type, 'smoothing value: ' + str(smooth_val)) # TESTING
     spec = Spectrum(input_path)
-    fig = pyplot.figure()
+    fig = pyplot.figure(figsize=(10,6))
     
     # uses other functions to perform user's specified smoothing
     if smooth_type == 'sigma' and smooth_val != 'none':
         # generates spectrum with regular gaussian smoothing, sigma specified
         series = regularSigmaGaussian(spec, plot_type, smooth_val)
-        series.plot(figsize=(10,6))
+        series.plot(label='flux', color=FLUX_COLOR, linewidth=LINE_WIDTH)
+        pyplot.title('{} - {}-sigma Gaussian smoothing'.format(os.path.basename(input_path), smooth_val))
     elif smooth_type == 'adaptive':
         # generates spectrum with adaptive smoothing on flux
         series = adaptiveGaussian(spec, smooth_val)
-        series.plot(figsize=(10,6))
+        series.plot(label='flux', color=FLUX_COLOR, linewidth=LINE_WIDTH)
+        pyplot.title('{} - adaptive Gaussian smoothing'.format(os.path.basename(input_path)))
     elif smooth_type == 'window':
         # generates spectrum with adaptive smoothing on flux with fixed window size
-        series = fixedWindowAdaptiveGaussian(spec, smooth_val)
-        series.plot(figsize=(10,6))
+        series = adaptiveGaussian(spec, smooth_val)
+        series.plot(label='flux', color=FLUX_COLOR, linewidth=LINE_WIDTH)
+        pyplot.title('{} - {}-pixel Gaussian smoothing'.format(os.path.basename(input_path), smooth_val))
     else:    
-        # default, generates normal raw spectrum
-        series, series_ivar = defaultGaussian(spec, plot_type, fig)
-        if not series_ivar.empty:
-            series.plot(figsize=(10,6))
-            series_ivar.plot()
+        # default, generates raw series chart for either flux, ivar, or both
+        series_flux, series_ivar = cleanedSeries(spec, plot_type)
+        if not series_ivar.empty and not series_flux.empty:
+            series_ivar.plot(label='ivar', color=IVAR_COLOR, linewidth=LINE_WIDTH)
+            series_flux.plot(label='flux', color=FLUX_COLOR, linewidth=LINE_WIDTH)
+            pyplot.title('{} - unsmoothed flux and ivar (scaled)'.format(os.path.basename(input_path)))
+            #fig.legend((series_ivar, series_flux), ('ivar', 'flux'), 'upper left')
+        elif not series_flux.empty:
+            series_flux.plot(label='flux', color=FLUX_COLOR, linewidth=LINE_WIDTH)
+            pyplot.title('{} - flux'.format(os.path.basename(input_path)))
+            # pyplot.ylabel('flux') # Useful only if we have units
         else:
-            series.plot(figsize=(10,6))
-        #TODO: fig.legend((series_ivar, series), ('ivar', 'flux'), 'upper left')
+            series_ivar.plot(label='ivar', color=IVAR_COLOR, linewidth=LINE_WIDTH)
+            pyplot.title('{} - ivar'.format(os.path.basename(input_path)))
 
-    # plots main series and saves png
+    # Common plot settings
+    pyplot.legend()
+    pyplot.grid(True)
+    pyplot.gca().xaxis.grid(True) # Vertical lines
+    pyplot.gca().xaxis.grid(True, which='minor') # Vertical lines
+    # Visually present the data on log scale (by default pyplot will make it linear)
+    pyplot.xlabel('lambda (Angstrom)')
+
     pyplot.savefig(outputPath)
     pyplot.close(fig)
 
+
 # gaussian function for default parameters, generates raw spectrum
-def defaultGaussian(spec, plot_type, fig):
+def cleanedSeries(spec, plot_type):
+    series_flux = Series([])
     series_ivar = Series([])
+    flux, ivar = cleanFluxIvar(spec.flux, spec.ivar)
     if plot_type == 'flux':
-        series = Series(spec.flux, spec.lam)
+        series_flux = Series(flux, spec.lam)
     elif plot_type == 'ivar':
-        series = Series(spec.ivar, spec.lam)
+        series_ivar = Series(ivar, spec.lam)
     else:
-        series = Series(scale(cleanValues(spec.flux), 0, 1), spec.lam)
-        series_ivar = Series(scale(limitOutliers(cleanValues(spec.ivar), 2.5), 0, 1), spec.lam)
-    return series, series_ivar
+        # Since we are plotting both on one, need to scale them to fit.
+        series_flux = Series(scale(flux, 0, 1), spec.lam)
+        series_ivar = Series(scale(ivar, 0, 1), spec.lam)
+    return series_flux, series_ivar
+
 
 # gaussian function for regular gaussian smoothing, sigma specified
 def regularSigmaGaussian(spec, plot_type, smooth_val):
@@ -93,26 +127,31 @@ def regularSigmaGaussian(spec, plot_type, smooth_val):
     return series
 
 # gaussian function for adaptive smoothing on flux
+# smooth_val should be either a (str) odd whole number or 'adaptive'.
 def adaptiveGaussian(spec, smooth_val):
     print('adaptiveGaussian reached') # testing
     smoothed_flux = adaptiveSmoothing(spec.flux, spec.ivar, smooth_val)
     series = Series(smoothed_flux, spec.lam)
     return series
 
-# gaussian function for adaptive smoothing on flux with fixed window sizE
-def fixedWindowAdaptiveGaussian(spec, smooth_val):
-    smoothed_flux = adaptiveSmoothing(spec.flux, spec.ivar, smooth_val) 
-    series = Series(smoothed_flux, spec.lam)
-    return series
 
 # crude function for plotting flux of a spectrum with adjusted pixels on log scale
 def logBinPixPlot(num_pix, input_path, output_path):
+    num_pix = int(num_pix)
     spec = Spectrum(input_path)
-    fig = pyplot.figure()
+    fig = pyplot.figure(figsize=(10,6))
     smoothed_flux = adaptiveSmoothing(spec.flux, spec.ivar)
-    flux, lam = logBinPixels(int(num_pix), spec.lam, smoothed_flux)
+    flux, lam = logBinPixels(num_pix, spec.lam, smoothed_flux, min_lam=MIN_BIN_LAMBDA, max_lam=MAX_BIN_LAMBDA, restore_lam_scale=True)
     series = Series(flux, lam)
-    series.plot(figsize=(10,6))
+    series.plot(label='flux', color=FLUX_COLOR, linewidth=LINE_WIDTH)
+    pyplot.legend()
+    pyplot.grid(True)
+    pyplot.gca().xaxis.grid(True) # Vertical lines
+    pyplot.gca().xaxis.grid(True, which='minor') # Vertical lines
+    # Visually present the data on log scale (by default pyplot will make it linear)
+    pyplot.title('{} - {} bins of log(lambda)'.format(os.path.basename(input_path), num_pix))
+    pyplot.xlabel('lambda (Angstrom)')
+    pyplot.xscale('log')
     pyplot.savefig(output_path)
     pyplot.close(fig)
 
@@ -159,6 +198,7 @@ if __name__=='__main__':
     count = 0
     for filename in args.filepath:
         count = count + 1 # testing
+        print('Processing {}'.format(filename))
         if args.sigma != 'none':
             print('sigma') # testing
             output = outputPath(filename, 'sigma', args.sigma, args.plotType)
@@ -172,7 +212,7 @@ if __name__=='__main__':
             output = outputPath(filename, 'windowSize', args.window, args.plotType)
             gaussianAndSave(filename, output, 'window', args.window, args.plotType)
         elif args.logbin != '0':
-            print('logbin image size') # testing
+            print('logbin image size: {}'.format(args.logbin)) # testing
             output = outputPath(filename, 'logbin', args.logbin, args.plotType)
             logBinPixPlot(args.logbin, filename, output)
         else:

@@ -67,15 +67,30 @@ class TestAdaptiveSmoothing(unittest.TestCase):
         self.assertEqual(100, loglam.size)
         self.assertAlmostEqual(10, loglam[0])
         self.assertAlmostEqual(10.99, loglam[99])
-        # In linear lambda space:
+        # In linear lambda space, 1000 elements:
         lam = np.linspace(math.exp(10-0.01), math.exp(10.99), 1000)
         self.assertEqual(1000, lam.size)
-        bin_flux, bin_lam = logBinPixels(100, lam, flux, min_lam=math.exp(10-0.01), max_lam=math.exp(10.99))
+
+        # Test of restore_lam_scale
+        bin_flux, bin_lam = logBinPixels(100, lam, flux, min_lam=math.exp(10-0.01), max_lam=math.exp(10.99), restore_lam_scale=True)
+        self.assertEqual(100, bin_lam.size)
+        npt.assert_almost_equal(math.exp(10), bin_lam[0], decimal=2)
+        npt.assert_almost_equal(math.exp(10.99), bin_lam[99], decimal=2)
+
+        # This is with no truncation
+        bin_flux, bin_lam = logBinPixels(100, lam, flux, min_lam=math.exp(10-0.01), max_lam=math.exp(10.99), restore_lam_scale=False)
         self.assertEqual(100, bin_lam.size)
         npt.assert_array_almost_equal(loglam, bin_lam)
         self.assertEqual(100, bin_flux.size)
         # All flux was 1.0, mean of each bin should be 1.0
         npt.assert_array_almost_equal(np.zeros(100)+1, bin_flux)
+
+        # Test of truncation of spectrum
+        flux[0:100] = 1000  # This should get cut out
+        bin_flux, bin_lam = logBinPixels(100, lam, flux, min_lam=lam[100], max_lam=math.exp(10.99))
+        self.assertEqual(100, bin_lam.size)
+        npt.assert_array_almost_equal(np.zeros(100)+1, bin_flux)
+
 
 if __name__ == '__main__':
     unittest.main()

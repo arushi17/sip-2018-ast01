@@ -13,6 +13,9 @@ def savePngToFile(x_series, y_series, filepath):
     fig = pyplot.figure()
     series = Series(y_series, x_series)
     series.plot(figsize=(10,6))
+    pyplot.grid(True)
+    pyplot.gca().xaxis.grid(True) # Vertical lines
+    pyplot.gca().xaxis.grid(True, which='minor') # Vertical lines
     pyplot.savefig(filepath)
     pyplot.close(fig)
 
@@ -36,21 +39,24 @@ def getGaussianWindow(window_size):
     else:
         return np.array([0])
 
-# Make sure each value is a valid positive float. If not, replace with a 0.
+# Make sure each value is a valid float. If not, replace with a 0.
+# Useful to make sure that (most) math operations on the series will succeed.
 # Returns a cleaned numpy array.
-def cleanValues(series_in):
+def cleanValues(series_in, allow_negatives=True):
     series = np.array(series_in) 
     for i in range(len(series)):
         try:
             n = float(series[i])
         except ValueError:
             series[i] = 0
-        if series[i] < 0 or math.isnan(series[i]) or math.isinf(series[i]):
+        if math.isnan(series[i]) or math.isinf(series[i]):
+            series[i] = 0
+        if not allow_negatives and series[i] < 0.0:
             series[i] = 0
     return series
     
 
-# limit_outliers, if > 1, specifies that outliers will be truncated to this many stddev
+# limit_outliers, if > 1, specifies that outliers (+ve & -ve) will be truncated to this many stddev
 # Returns a new numpy array.
 def limitOutliers(series_in, limit_outliers):
     series = np.array(series_in) 
@@ -62,11 +68,13 @@ def limitOutliers(series_in, limit_outliers):
     max_val = mean + limit_outliers * stddev
     min_val = mean - limit_outliers * stddev
     for i in range(len(series)):
-        if series[i] > max_val:
+        # In both flux and ivar, 0 has a special meaning. Don't change it!
+        if series[i] != 0 and series[i] > max_val:
             series[i] = max_val
-        elif series[i] < min_val:
+        elif series[i] != 0 and series[i] < min_val:
             series[i] = min_val
     return series
+
 
 # returns a new numpy array that standardizes an already cleaned series
 def standardize(series):
@@ -75,13 +83,19 @@ def standardize(series):
     std_series = (series - mean) / stddev
     return std_series
 
+
 # returns a new numpy array that scales an already cleaned series to be inbetween max and min (expects series to be a numpy array)
 def scale(series, min_scale, max_scale):
     series_min = series.min()
     series_max = series.max()
-    return ((series - series_min) / (series_max - series_min)) * (max_scale - min_scale) + min_scale
+    if series_max == series_min:
+        print('Series has no useful data. Min and max are: {}'.format(series_min))
+        return series
+    else:
+        return ((series - series_min) / (series_max - series_min)) * (max_scale - min_scale) + min_scale
 
-# returns window size
+
+# returns window size. smooth_val should be either a (str) odd whole number or 'adaptive'.
 def determineWindowSize(ivar, i, smooth_val):
     if smooth_val == 'adaptive':
         # 15 pixel window
@@ -100,19 +114,22 @@ def determineWindowSize(ivar, i, smooth_val):
         # pre-specified window size 
         return int(smooth_val)
 
-# returns cleaned up flux and ivar
-def cleanFluxIvar(flux_in, ivar_in):
-    ivar = cleanValues(ivar_in)
-    ivar = np.sqrt(ivar)
-    ivar = limitOutliers(ivar, 2.5)
-    ivar = scale(ivar, 0, 1)
 
-    flux = cleanValues(flux_in)
-    flux = scale(flux, 0, 1)
+# returns (mathematically) cleaned up flux and ivar:
+# Some ivar values tend to deviate unreasonably from most others -- truncates them to 2.5 stddev.
+def cleanFluxIvar(flux_in, ivar_in):
+    flux = cleanValues(flux_in, allow_negatives=True)
+    # Very rarely, there can be some crazy flux values (though negatives are ok).
+    # But be careful not to get rid of true emission lines (use a high stddev).
+    flux = limitOutliers(flux, 5.0)
+
+    # ivar values are almost never negative.
+    ivar = cleanValues(ivar_in, allow_negatives=False)
+    ivar = limitOutliers(ivar, 2.5)
 
     return flux, ivar
 
-#TODO: limit scaling to reasonable range
+
 # returns a numpy array storing the combination of gaussian weights and ivar, scaled
 def gaussianWeightedIvar(window_size, ivar, i):
     gweights = getGaussianWindow(window_size)
@@ -131,6 +148,7 @@ def gaussianWeightedIvar(window_size, ivar, i):
     else:
         return weighted_ivar / sum_of_weights
 
+
 # returns a single adapted flux value
 def convolutionFlux(flux, window_size, weighted_ivar, i):
     step_size = (window_size - 1) / 2
@@ -139,11 +157,18 @@ def convolutionFlux(flux, window_size, weighted_ivar, i):
     if (slice_max - slice_min != window_size):
         print('ERROR: window_size: {}, i: {}, slice_min: {}, slice_max: {}'.format(window_size, i, slice_min, slice_max))
     flux_slice = flux[slice_min:slice_max]
+    # convolve reverses the kernel before convolving! flip() will reverse it first.
     return np.asscalar(np.convolve(np.flip(flux_slice, axis=0), weighted_ivar, mode='valid'))
 
+
 # returns a numpy array containing smoothed flux, size 8k
+# smooth_val should be either a (str) odd whole number or 'adaptive'.
 def adaptiveSmoothing(flux_in, ivar_in, smooth_val='adaptive'):
     flux, ivar = cleanFluxIvar(flux_in, ivar_in)
+    # Better to use scaled ivar, since absolute ivar values vary wildly from fits to fits.
+    # These will be used to determine window size.
+    ivar = scale(ivar, 0, 1)
+
     ivar = np.pad(ivar, (30, 30), 'edge')
     flux = np.pad(flux, (30, 30), 'edge')
     
@@ -164,6 +189,7 @@ def adaptiveSmoothing(flux_in, ivar_in, smooth_val='adaptive'):
 
     return smoothed_flux
 
+
 # returns a numpy array containing spectrum wavelength adjusted to log scale
 def logLamConvert(lam):
     loglam = np.zeros(len(lam))
@@ -174,16 +200,19 @@ def logLamConvert(lam):
             loglam[i] = np.log(lam[i])
     return loglam
 
+
 # returns flux and wavelengths of a spectrum converted to a desired number of pixels,
 # with x-axis binned by lambda adjusted to log scale. So, at the blue end of the spectrum
 # we may have 30 pixels binned into a single output pixel, while at the red end we may
 # have 60. Effectively stretches the spectrum at the blue end, shrinks at the red end.
 # The returned log(lambda) values represent the upper limit of each bin.
-# Best to use this after adaptive smoothing.
+# NOTE: Best to use this after adaptive smoothing.
 # Since there is likely some benefit of fixing log(lam) to x-axis position/pixel mapping
 # across all spectra, caller can supply non-zero min_lam and max_lam values (in Angtroms).
-# Wavelengths below min_lam (and their flux) will be dropped; similarly for max_lam.
-def logBinPixels(num_pix, lam, flux, min_lam=0, max_lam=0):
+# Wavelengths below min_lam (and their flux) will be dropped before binning; same for max_lam.
+# If restore_lam_scale == True, we map the binned log(lam) values back to lam space, which
+# can make charts more readable.
+def logBinPixels(num_pix, lam, flux, min_lam=0, max_lam=0, restore_lam_scale=True):
     # determine how many log(lam) each pixel in adjusted image should cover
     # Find the first non-zero lambda value at each end.
     if min_lam > 0:
@@ -207,19 +236,32 @@ def logBinPixels(num_pix, lam, flux, min_lam=0, max_lam=0):
     for i in range(num_pix):
         bin_bound[i] = min_loglam + pix_width * (i + 1)
 
+    # Skip over spectra that we have been asked to drop
+    lam_end_pix = 0
+    while lam_end_pix < len(lam) and lam[lam_end_pix] < min_lam: 
+        lam_end_pix += 1
+
     # go through lam array and fill pixel bins by taking mean of all below the boundary
     adj_spec = np.zeros(num_pix)
-    lam_end_pix = 0
     for bound in range(num_pix):
-        lam_start_pix = lam_end_pix
+        lam_start_pix = lam_end_pix # Start at previous end
         while lam_end_pix < len(lam) and lam[lam_end_pix] <= math.exp(bin_bound[bound]): 
             lam_end_pix += 1
         # print('bound: {}, lam_start_pix: {}, lam_end_pix: {}'.format(bound, lam_start_pix, lam_end_pix)) # TESTING
         if lam_end_pix > lam_start_pix:
             # lam_end_pix now points to 1 beyond the range we want
             adj_spec[bound] = np.mean(flux[lam_start_pix:lam_end_pix])
-            # print('adj_spec: {}'.format(adj_spec[bound])) # TESTING
-    return np.float32(adj_spec), np.float32(bin_bound)
+        elif lam_end_pix > 2000 and lam_end_pix < 6000:
+            # This is a problem in the spec.lam data, where there is a jump in lambda at the chip gap.
+            # Just extrapolate from the previous 3 values so we don't get a huge dip.
+            print('Extrapolating over chip gap at bin {}, lam_end_pix: {}'.format(bound, lam_end_pix))
+            adj_spec[bound] = np.mean(adj_spec[bound-3:bound])
+
+    if restore_lam_scale:
+        for i in range(num_pix):
+            bin_bound[i] = math.exp(bin_bound[i])
+
+    return adj_spec, bin_bound
 
 
 # Data loading code used by Tensorflow. Load from a given .fits file.
@@ -240,21 +282,19 @@ def featuresFromFits(filepath, ARGS, min_bin_lambda=0, max_bin_lambda=0):
         # distance between any known emission/absorption features is the same irrespective of
         # amount of redshift (z). Also re-bin the flux into a smaller number of pixels.
         smoothed_flux = adaptiveSmoothing(spec.flux, spec.ivar)
-        flux, loglam = logBinPixels(ARGS.loglam, spec.lam, smoothed_flux, min_lam=min_bin_lambda, max_lam=max_bin_lambda)
-        log_binned_flux = np.float32(standardize(flux))
+        logflux, loglam = logBinPixels(ARGS.loglam, spec.lam, smoothed_flux, min_lam=min_bin_lambda, max_lam=max_bin_lambda, restore_lam_scale=False)
+        log_binned_flux = np.float32(standardize(logflux))
         return log_binned_flux.reshape((len(log_binned_flux), 1))
         #return np.transpose(np.array([log_binned_flux, loglam]))
     else:
         # Make both raw ivar and flux as channels.
-        flux = cleanValues(spec.flux)
+        flux, ivar = cleanFluxIvar(spec.flux, spec.ivar)
         # TODO: Try just scaling flux from 0 to 1
         flux = np.float32(standardize(flux))
 
-        ivar = cleanValues(spec.ivar)
-        ivar = np.sqrt(ivar)
-        ivar = limitOutliers(ivar, 2.5)
+        ivar = np.sqrt(ivar) # cleanFluxIvar removes negative ivar values
         # TODO: ivar of 0 has a special meaning (don't trust the flux)
-        # ivar = scale(ivar, 0, 1.0)
+        # ivar = np.float32(scale(ivar, 0, 1.0))
         ivar = np.float32(standardize(ivar))
 
         if flux.shape != ivar.shape:
