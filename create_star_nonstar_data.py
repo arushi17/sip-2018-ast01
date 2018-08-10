@@ -100,12 +100,12 @@ def copy_1_fits_file(source_data_dir, maskname, slitname, objname, zqual, target
     zqual = int(zqual)
     # Keep track of each object that we have known classification for, even if we are not
     # interested in each class. objname seems to be unique only within a mask.
-    if zqual == 1 or zqual == 3 or zqual == 4:
+    if zqual == 1 or zqual == 4:
         print('zqual ' + str(zqual) + ': ' + source_data_dir + '/' + filename + ' --> ' + target_dir + '/star')
-        shutil.copy(source_data_dir + '/' + filename, target_dir + '/star')
+        #shutil.copy(source_data_dir + '/' + filename, target_dir + '/star')
     if zqual == 0:
         print('zqual ' + str(zqual) + ': ' + source_data_dir + '/' + filename + ' --> ' + target_dir + '/nonstar')
-        shutil.copy(source_data_dir + '/' + filename, target_dir + '/nonstar')
+        #shutil.copy(source_data_dir + '/' + filename, target_dir + '/nonstar')
 
 
 def copy_from_1_directory_zspec_fits(survey_dir, fits_data, target_dir, known_zqual, do_not_copy_map):
@@ -167,10 +167,27 @@ def copy_from_1_directory_ppxf_path(survey_dir, ppxf_path, target_dir, known_zqu
         copy_1_fits_file(source_data_dir, maskname, slitname[i], objname[i], zqual[i], target_dir)
 
 
+def do_not_copy_map_candels_halo7d_catalog(survey_dir, map_candels_halo7d_catalog):
+    # for the auto-add halo7d galaxies: do not add those with zspec -99
+    catalog = survey_dir + '/zspec/ALL4_CANDELS_HALO7D_catalog.txt'
+    print(catalog)
+
+    with open(catalog) as f:
+        lines_list = f.readlines()
+    for i in range(len(lines_list)):
+        line = lines_list[i]
+        split_line_list = line.split()
+        if len(split_line_list) < 9:
+            continue
+        objname = split_line_list[1]
+        zspec = split_line_list[8]
+
+        if zspec == '-99.0':
+            map_candels_halo7d_catalog[objname] = 0
+
 def do_not_copy_map_from_txt_out(survey_dir, do_not_copy_map):
     # for halo7d only, checks all .txt files for mention of "TiO" or " M "
     # also checks all .out files for "-2 0" pattern
-    # returns map of TiO/M objects and alignment stars
     
     txt_files = glob.glob(survey_dir + '/zspec/*notes.txt')
     for txt_file in txt_files:
@@ -214,8 +231,9 @@ def do_not_copy_map_from_txt_out(survey_dir, do_not_copy_map):
             
 
 # Process HALO7D survey
-def process_halo7d_survey(survey_dir, target_dir, known_zqual, do_not_copy_map):
+def process_halo7d_survey(survey_dir, target_dir, known_zqual, do_not_copy_map, map_candels_halo7d_catalog):
     do_not_copy_map_from_txt_out(survey_dir, do_not_copy_map)
+    do_not_copy_map_candels_halo7d_catalog(survey_dir, map_candels_halo7d_catalog)
     zspec_fits = glob.glob(survey_dir + '/zspec/zspec*.fits')
     for fits_file in zspec_fits:
         zspec = fits.open(fits_file)
@@ -242,14 +260,18 @@ def process_halo7d_survey(survey_dir, target_dir, known_zqual, do_not_copy_map):
             m = re.search('spec1d\.(.+)\.[0-9]+\.(.+)\.fits', filename)
             maskname = m.group(1)
             objname = m.group(2)
+            if objname in map_candels_halo7d_catalog:
+                print('{}: Found an unknown object in CANDELS/HALO7D catalog, will exclude from dataset'.format(objname))
+                continue # Unknown objects with -99.0 zspec
             if objname.startswith('serendip'):
+                print('{}: Found a serendip object, will exclude from dataset'.format(objname))
                 continue  # We don't trust that these serendipitous objects are galaxies
 
             objid = unique_obj_id(maskname, objname)
             if objid not in known_zqual and objid not in do_not_copy_map:
                 known_zqual[objid] = 0  # Galaxy
                 print('Not in zspec.fits: ' + filepath + ' --> ' + target_dir + '/nonstar')
-                shutil.copy(filepath, target_dir + '/nonstar')
+                #shutil.copy(filepath, target_dir + '/nonstar')
 
 
 # Process VDGC survey
@@ -269,9 +291,10 @@ def process_vdgc_survey(survey_dir, target_dir, known_zqual, do_not_copy_map):
 # Use this map to keep track of them.
 known_zqual = {}  # Empty dict
 do_not_copy_map = {}  # Empty dict
+map_candels_halo7d_catalog = {} # Empty dict
 
 process_vdgc_survey(os.path.expanduser("~") + '/ast01/vdgc', TARGET_DIR, known_zqual, do_not_copy_map)
-process_halo7d_survey(os.path.expanduser("~") + '/ast01/halo7d', TARGET_DIR, known_zqual, do_not_copy_map)
+process_halo7d_survey(os.path.expanduser("~") + '/ast01/halo7d', TARGET_DIR, known_zqual, do_not_copy_map, map_candels_halo7d_catalog)
 
 print('\n++++++++ SUMMARY')
 # Invert the map so we can print summary stats
