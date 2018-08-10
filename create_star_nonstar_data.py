@@ -15,31 +15,72 @@ TARGET_DIR = os.path.expanduser("~") + '/ast01/training_data'
 def unique_obj_id(mask_variant, objname):
     # HALO7D mask variations
     mask_map = {
+            'E0': 'E0',
             'E0c': 'E0',
             'E0d': 'E0',
+            'E1': 'E1',
             'E1a': 'E1',
+            'E2': 'E2',
             'E2a': 'E2',
+            'E3': 'E3',
             'E3a': 'E3',
+            'E4': 'E4',
             'E4a': 'E4',
             'E5a': 'E5',
+            'E5b': 'E5',
+            'E5s': 'E5',
+            'E5s_1': 'E5',
+            'E5s_2': 'E5',
+            'E5shy': 'E5',
+            'E6': 'E6',
+            'e6': 'E6',
+            'E6_s': 'E6',
             'E6a': 'E6',
+            'E6s': 'E6',
+            'E6b': 'E6',
             'E7a': 'E7',
+            'E7b': 'E7',
+            'E7_s': 'E7',
             'GN0a': 'GN0',
+            'GN0b': 'GN0',
+            'GN0c': 'GN0',
             'GN2a': 'GN2',
+            'GN2b': 'GN2',
             'GN3_cc': 'GN3',
             'GN3e_t': 'GN3',
             'GN3C': 'GN3',
             'GN3D': 'GN3',
+            'c0': 'c0',
             'c0c': 'c0',
             'c1a': 'c1',
+            'c1b': 'c1',
+            'c1c': 'c1',
+            'c1d': 'c1',
+            'c1s': 'c1',
             'c2a': 'c2',
+            'c2b': 'c2',
+            'c2c': 'c2',
+            'c2s': 'c2',
             'c3a': 'c3',
+            'c3b': 'c3',
+            'c3s': 'c3',
+            'gn1': 'gn1',
             'gn1c': 'gn1',
             'gn1d': 'gn1',
             'gn1e_t': 'gn1',
             'gs0d': 'gs0',
+            'gs0a': 'gs0',
+            'gs0b': 'gs0',
             'gs0d_0': 'gs0',
+            'gs0a_0': 'gs0',
+            'gs0a_1': 'gs0',
+            'gs0b_2': 'gs0',
+            'gs0e_1': 'gs0',
             'gs1d_0': 'gs1',
+            'gs1b_2': 'gs1',
+            'gs1c_0': 'gs1',
+            'gs1c_1': 'gs1',
+            'gs1e_1': 'gs1',
             'gs1d': 'gs1',
     }
 
@@ -61,10 +102,10 @@ def copy_1_fits_file(source_data_dir, maskname, slitname, objname, zqual, target
     # interested in each class. objname seems to be unique only within a mask.
     if zqual == 1 or zqual == 3 or zqual == 4:
         print('zqual ' + str(zqual) + ': ' + source_data_dir + '/' + filename + ' --> ' + target_dir + '/star')
-        #shutil.copy(source_data_dir + '/' + filename, target_dir + '/star')
+        shutil.copy(source_data_dir + '/' + filename, target_dir + '/star')
     if zqual == 0:
         print('zqual ' + str(zqual) + ': ' + source_data_dir + '/' + filename + ' --> ' + target_dir + '/nonstar')
-        #shutil.copy(source_data_dir + '/' + filename, target_dir + '/nonstar')
+        shutil.copy(source_data_dir + '/' + filename, target_dir + '/nonstar')
 
 
 def copy_from_1_directory_zspec_fits(survey_dir, fits_data, target_dir, known_zqual, do_not_copy_map):
@@ -126,9 +167,11 @@ def copy_from_1_directory_ppxf_path(survey_dir, ppxf_path, target_dir, known_zqu
         copy_1_fits_file(source_data_dir, maskname, slitname[i], objname[i], zqual[i], target_dir)
 
 
-def do_not_copy_map_from_txt(survey_dir, do_not_copy_map):
+def do_not_copy_map_from_txt_out(survey_dir, do_not_copy_map):
     # for halo7d only, checks all .txt files for mention of "TiO" or " M "
-    # returns map of TiO/M objects
+    # also checks all .out files for "-2 0" pattern
+    # returns map of TiO/M objects and alignment stars
+    
     txt_files = glob.glob(survey_dir + '/zspec/*notes.txt')
     for txt_file in txt_files:
         print(txt_file)
@@ -146,11 +189,33 @@ def do_not_copy_map_from_txt(survey_dir, do_not_copy_map):
             if line.find('TiO') > -1 or line.find(' M ') > -1:
                 do_not_copy_map[unique_obj_id(maskname, objname)] = 0
                 print('Found a TiO/M star, will exclude from dataset')
+    
+    out_files = glob.glob(survey_dir + '/zspec/*.out')
+    for out_file in out_files:
+        print(out_file)
+
+        with open(out_file) as f:
+            lines_list = list(f)
+        for i in range(len(lines_list)):
+           line = lines_list[i]
+           split_line_list = line.split()
+           if len(split_line_list) < 8:
+               continue
+           objname = split_line_list[0]
+           maskname = os.path.basename(out_file)[0:os.path.basename(out_file).find('.')]
+           objid = unique_obj_id(maskname, objname)
+
+           al_star_6 = split_line_list[6]
+           al_star_7 = split_line_list[7]
+           if al_star_6 == '-2' and al_star_7 == '0':
+               if objid not in do_not_copy_map:
+                    do_not_copy_map[objid] = 0
+                    print('{}: Found an alignment star, will exclude from dataset'.format(objid))
             
 
 # Process HALO7D survey
 def process_halo7d_survey(survey_dir, target_dir, known_zqual, do_not_copy_map):
-    do_not_copy_map_from_txt(survey_dir, do_not_copy_map)
+    do_not_copy_map_from_txt_out(survey_dir, do_not_copy_map)
     zspec_fits = glob.glob(survey_dir + '/zspec/zspec*.fits')
     for fits_file in zspec_fits:
         zspec = fits.open(fits_file)
@@ -184,7 +249,7 @@ def process_halo7d_survey(survey_dir, target_dir, known_zqual, do_not_copy_map):
             if objid not in known_zqual and objid not in do_not_copy_map:
                 known_zqual[objid] = 0  # Galaxy
                 print('Not in zspec.fits: ' + filepath + ' --> ' + target_dir + '/nonstar')
-                #shutil.copy(filepath, target_dir + '/nonstar')
+                shutil.copy(filepath, target_dir + '/nonstar')
 
 
 # Process VDGC survey
@@ -214,4 +279,4 @@ inv_map = {}
 for k, v in known_zqual.items():
     inv_map.setdefault(v, []).append(k)
 for k, v in inv_map.items():
-    print('\nZQual {}: {} spectra\n{}'.format(k, len(v), sorted(v)))
+    print('\nZqual {}: {} spectra\n{}'.format(k, len(v), sorted(v)))
