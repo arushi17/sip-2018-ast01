@@ -196,15 +196,16 @@ def logBin3Conv2Dense(x, is_training, params):
     num_classes = params['num_classes']
     drop_rate = params['drop_rate']
     l2_scale = params['l2_scale']
+    conv1_width = params['conv1_width']
 
     # Input: 100 x 1, outputs: 90 x 4, weights: 1 x 10 x 4 = 40
-    net = conv1d(x, 4, 10, strides=1, data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    net = conv1d(x, 4, conv1_width, strides=1, data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
     # Input: 90 x 4, outputs: 45 x 4, weights: 0
     net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool1')
     net = dropout(net, rate=drop_rate, training=is_training, name='pool1_dropout')
 
     # Input: 45 x 4, outputs: 20 x 8, weights: 4 x 10 x 8 = 320
-    net = conv1d(net, 8, 10, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    net = conv1d(net, 8, conv1_width, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
     # Input: 20 x 8, outputs: 10 x 8, weights: 0
     net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool2')
     net = dropout(net, rate=drop_rate, training=is_training, name='pool2_dropout')
@@ -229,21 +230,22 @@ def logBin4Conv2Dense(x, is_training, params):
     num_classes = params['num_classes']
     drop_rate = params['drop_rate']
     l2_scale = params['l2_scale']
+    conv1_width = params['conv1_width']
 
     # Input: 128 x 1, outputs: 128 x 4, weights: 1 x 11 x 4 = 44
-    net = conv1d(x, 4, 11, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    net = conv1d(x, 4, conv1_width, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
     # Input: 128 x 4, outputs: 64 x 4, weights: 0
     net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool1')
     net = dropout(net, rate=drop_rate, training=is_training, name='pool1_dropout')
 
     # Input: 64 x 4, outputs: 64 x 8, weights: 4 x 11 x 8 = 352
-    net = conv1d(net, 8, 11, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    net = conv1d(net, 8, conv1_width, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
     # Input: 64 x 8, outputs: 32 x 8, weights: 0
     net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool2')
     net = dropout(net, rate=drop_rate, training=is_training, name='pool2_dropout')
 
     # Input: 32 x 8, outputs: 32 x 16, weights: 8 x 11 x 32 = 2816
-    net = conv1d(net, 16, 11, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv3', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    net = conv1d(net, 16, conv1_width, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv3', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
     # Input: 32 x 16, outputs: 16 x 16, weights: 0
     net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool3')
     net = dropout(net, rate=drop_rate, training=is_training, name='pool3_dropout')
@@ -268,21 +270,22 @@ def logBin5Conv2Dense(x, is_training, params):
     num_classes = params['num_classes']
     drop_rate = params['drop_rate']
     l2_scale = params['l2_scale']
+    conv1_width = params['conv1_width']
 
     # Input: 128 x 1, outputs: 128 x 4, weights: 1 x 11 x 4 = 44
-    net = conv1d(x, 4, 11, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    net = conv1d(x, 4, conv1_width, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
     # Input: 128 x 4, outputs: 64 x 4, weights: 0
     net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool1')
     net = dropout(net, rate=drop_rate, training=is_training, name='pool1_dropout')
 
     # Input: 64 x 4, outputs: 64 x 8, weights: 4 x 11 x 8 = 352
-    net = conv1d(net, 8, 11, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    net = conv1d(net, 8, conv1_width, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
     # Input: 64 x 8, outputs: 32 x 8, weights: 0
     net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool2')
     net = dropout(net, rate=drop_rate, training=is_training, name='pool2_dropout')
 
     # Input: 32 x 8, outputs: 32 x 16, weights: 8 x 11 x 32 = 2816
-    net = conv1d(net, 16, 11, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv3', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    net = conv1d(net, 16, conv1_width, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv3', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
     # Input: 32 x 16, outputs: 16 x 16, weights: 0
     net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool3')
     net = dropout(net, rate=drop_rate, training=is_training, name='pool3_dropout')
@@ -457,7 +460,7 @@ def printNetworkInfo(model, print_weights=False):
 def modelFn(features, labels, mode, params):
     is_training = (mode == tf.estimator.ModeKeys.TRAIN)
     # Change network model here
-    logits, x = veryWideCNN(
+    logits, x = logBin5Conv2Dense(
                 features['features'], 
                 is_training,
                 params)
@@ -670,7 +673,7 @@ def trainModel(train_metadata, dev_metadata, params, results):
         print(matrix_to_print)
 
     # Print network info. This uses latest checkpoint, so delete extra checkpoints after this.
-    printNetworkInfo(model, True)
+    printNetworkInfo(model, print_weights=False)
     deleteExtraCheckpoints(cp_path)
 
     print('==========================================================================')
@@ -701,14 +704,14 @@ if __name__=='__main__':
     # but strong regularization seems to help.
     LEARNING_RATES = [4e-4, 2e-4]
     BATCH_SIZES = [32]
-    DROP_RATES = [0.02, 0.01, 0.005]  # Use with logbinned, conv
+    DROP_RATES = [0.01, 0.005]  # Use with logbinned, conv
     #DROP_RATES = [0.1, 0.01, 0]  # Use with logbinned, fully connected
     #DROP_RATES = [0.2, 0.25]  # Use with full 8k
     # L2_SCALE cannot be 0
     L2_SCALES = [0.004, 0.002]  # Use with logbinned, conv
     #L2_SCALES = [0.001, 0.01, 0.1]  # Use with logbinned, fully connected
     #L2_SCALES = [0.1, 0.05]  # Use with full 8k
-    CONV1_WIDTH = [300, 500]
+    CONV1_WIDTH = [7, 13]  # Use with  logbinned, conv
 
     if ARGS.adaptive:
         print('Will use adaptive gaussian smoothing using ivar and flux.')
