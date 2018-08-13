@@ -22,27 +22,31 @@ FLUX_COLOR='blue'
 IVAR_COLOR='orange'
 LINE_WIDTH=0.5
 
+OUTPUT_DIR = os.path.expanduser("~") + '/ast01/graphs/'
+
 # output path based on input path
 # smooth_type should be adaptiveSmoothing, logbin, windowSize, or sigma.
 # smooth_val should be either a (str) odd whole number or 'none' or 'adaptive'.
 # plot_type should be flux, ivar, or both.
 def outputPath(input_path, smooth_type, smooth_val, plot_type):
-    file = input_path[:-5]
+    obj_type = os.path.basename(os.path.dirname(input_path))  # star or nonstar
+    filename = os.path.basename(input_path)[:-5]  # Remove the .fits extension
+
     if smooth_val == 'none':
         # default, normal spectrum
         if plot_type == 'flux':
-            output = file + '_rawFlux.png'
+            output = filename + '_rawFlux.png'
         elif plot_type == 'ivar':
-            output = file + '_rawIvar.png'
+            output = filename + '_rawIvar.png'
         else:
-            output = file + '_scaledFluxIvar.png'
+            output = filename + '_scaledFluxIvar.png'
     elif smooth_type == 'adaptiveSmoothing':
-        output = file + '_' + smooth_type + '.png'
+        output = filename + '_' + smooth_type + '.png'
     elif smooth_type == 'logbin':
-        output = file + '_LogBin' + smooth_val + '.png'
+        output = filename + '_LogBin' + smooth_val + '.png'
     else:
-        output = file + '_' + smooth_type + str(smooth_val) + '.png'
-    return output
+        output = filename + '_' + smooth_type + str(smooth_val) + '.png'
+    return OUTPUT_DIR + obj_type + '/' + output
 
 # uses spectrum_fits_utils to apply gaussian smoothing to flux array, save it as a series object with .png
 # smooth_type should be adaptive, logbin, window, or sigma.
