@@ -3,13 +3,17 @@
 # last modified: 7/13/18
 
 from astropy.io import fits
+import errno
 import glob
 import os.path
+import os
 import re
 import shutil
 import sys
 
-TARGET_DIR = os.path.expanduser("~") + '/ast01/training_data'
+##################### IMPORTANT! SET THIS TO THE CORRECT DATA VERSION #######################
+DATA_VERSION=v7
+
 
 # Given a maskname variant and objname, returns the unique ID using the underlying maskname.
 def unique_obj_id(mask_variant, objname):
@@ -102,10 +106,10 @@ def copy_1_fits_file(source_data_dir, maskname, slitname, objname, zqual, target
     # interested in each class. objname seems to be unique only within a mask.
     if zqual == 1 or zqual == 4:
         print('zqual ' + str(zqual) + ': ' + source_data_dir + '/' + filename + ' --> ' + target_dir + '/star')
-        #shutil.copy(source_data_dir + '/' + filename, target_dir + '/star')
+        shutil.copy(source_data_dir + '/' + filename, target_dir + '/star')
     if zqual == 0:
         print('zqual ' + str(zqual) + ': ' + source_data_dir + '/' + filename + ' --> ' + target_dir + '/nonstar')
-        #shutil.copy(source_data_dir + '/' + filename, target_dir + '/nonstar')
+        shutil.copy(source_data_dir + '/' + filename, target_dir + '/nonstar')
 
 
 def copy_from_1_directory_zspec_fits(survey_dir, fits_data, target_dir, known_zqual, do_not_copy_map):
@@ -271,7 +275,7 @@ def process_halo7d_survey(survey_dir, target_dir, known_zqual, do_not_copy_map, 
             if objid not in known_zqual and objid not in do_not_copy_map:
                 known_zqual[objid] = 0  # Galaxy
                 print('Not in zspec.fits: ' + filepath + ' --> ' + target_dir + '/nonstar')
-                #shutil.copy(filepath, target_dir + '/nonstar')
+                shutil.copy(filepath, target_dir + '/nonstar')
 
 
 # Process VDGC survey
@@ -287,19 +291,35 @@ def process_vdgc_survey(survey_dir, target_dir, known_zqual, do_not_copy_map):
         copy_from_1_directory_zspec_fits(survey_dir, data, target_dir, known_zqual, do_not_copy_map)
 
 
-# All halo7d files NOT mentioned in zspec.fits or ppxf.dat are nonstars.
-# Use this map to keep track of them.
-known_zqual = {}  # Empty dict
-do_not_copy_map = {}  # Empty dict
-map_candels_halo7d_catalog = {} # Empty dict
+def make_dirs(root_dir):
+    print('Making directories in {}'.format(root_dir))
+    os.makedirs(root_dir, exist_ok=True)
+    os.makedirs(root_dir + '/star', exist_ok=True)
+    os.makedirs(root_dir + '/nonstar', exist_ok=True)
 
-process_vdgc_survey(os.path.expanduser("~") + '/ast01/vdgc', TARGET_DIR, known_zqual, do_not_copy_map)
-process_halo7d_survey(os.path.expanduser("~") + '/ast01/halo7d', TARGET_DIR, known_zqual, do_not_copy_map, map_candels_halo7d_catalog)
 
-print('\n++++++++ SUMMARY')
-# Invert the map so we can print summary stats
-inv_map = {}
-for k, v in known_zqual.items():
-    inv_map.setdefault(v, []).append(k)
-for k, v in inv_map.items():
-    print('\nZqual {}: {} spectra\n{}'.format(k, len(v), sorted(v)))
+if __name__=='__main__':
+    # Make all the directories
+    training_dir = os.path.expanduser("~") + '/ast01/data.' + DATA_VERSION + '/training_data'
+    dev_dir = os.path.expanduser("~") + '/ast01/data.' + DATA_VERSION + '/dev_data'
+    test_dir = os.path.expanduser("~") + '/ast01/data.' + DATA_VERSION + '/test_data'
+    make_dirs(training_dir)
+    make_dirs(dev_dir)
+    make_dirs(test_dir)
+
+    # All halo7d files NOT mentioned in zspec.fits or ppxf.dat are nonstars.
+    # Use this map to keep track of them.
+    known_zqual = {}  # Empty dict
+    do_not_copy_map = {}  # Empty dict
+    map_candels_halo7d_catalog = {} # Empty dict
+
+    process_vdgc_survey(os.path.expanduser("~") + '/ast01/vdgc', training_dir, known_zqual, do_not_copy_map)
+    process_halo7d_survey(os.path.expanduser("~") + '/ast01/halo7d', training_dir, known_zqual, do_not_copy_map, map_candels_halo7d_catalog)
+
+    print('\n++++++++ SUMMARY')
+    # Invert the map so we can print summary stats
+    inv_map = {}
+    for k, v in known_zqual.items():
+        inv_map.setdefault(v, []).append(k)
+    for k, v in inv_map.items():
+        print('\nZqual {}: {} spectra\n{}'.format(k, len(v), sorted(v)))
