@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-""" 
+"""
 1D CNN classifier.
 Uses Estimator (new eager execution style).
 
@@ -25,11 +25,12 @@ import numpy as np
 import os
 import random
 import re
+import sys
 import time
 import tensorflow as tf
 from tensorflow.python.client import device_lib
 
-HOME_DIR = expanduser("~") + '/ast01'
+HOME_DIR = expanduser("~") + '/ast01/data'
 # where is the dataset?
 TRAIN_DATA_DIR = HOME_DIR + '/training_data'
 DEV_DATA_DIR = HOME_DIR + '/dev_data'
@@ -58,7 +59,6 @@ NUM_CHECKPOINTS_SAVED = 20
 # expressed as a percentage.
 ES_MIN_GENERALIZATION_LOSS = 1.0
 ES_MIN_PROGRESS_QUOTIENT = 0.4
-ES_MIN_EPOCHS = 20
 
 # from tensorflow.layers import ...
 # We learn weights for these:
@@ -74,9 +74,10 @@ xavier_init = tf.contrib.layers.xavier_initializer()
 regularizer = tf.contrib.layers.l2_regularizer
 
 parser = argparse.ArgumentParser(description='Loads spectra from fits files, trains model.')
-parser.add_argument('-a', '--adaptive', type=bool, default=False, help='Use adaptive gaussian smoothing that combines ivar and flux into one series.') 
-parser.add_argument('-l', '--loglam', type=int, default=0, help='Use adaptive gaussian smoothing AND log(lambda) rescaling and binning of adaptive flux into this pixel width.') 
-parser.add_argument('-f', '--fraction', type=float, default=1.0, help='Fraction of training data to be loaded.') 
+parser.add_argument('-m', '--modelname', type=str, default='logBin4Conv2Dense', help='String name of model function to use.')
+parser.add_argument('-a', '--adaptive', type=bool, default=False, help='Use adaptive gaussian smoothing that combines ivar and flux into one series.')
+parser.add_argument('-l', '--loglam', type=int, default=0, help='Use adaptive gaussian smoothing AND log(lambda) rescaling and binning of adaptive flux into this pixel width.')
+parser.add_argument('-f', '--fraction', type=float, default=1.0, help='Fraction of training data to be loaded.')
 ARGS = parser.parse_args()
 
 
@@ -460,41 +461,69 @@ def printNetworkInfo(model, print_weights=False):
 def modelFn(features, labels, mode, params):
     is_training = (mode == tf.estimator.ModeKeys.TRAIN)
     # Change network model here
-    logits, x = logBin5Conv2Dense(
-                features['features'], 
+    logits, x = globals()[params['model_name']](
+                features['features'],
                 is_training,
                 params)
-    y_hat = tf.nn.softmax(logits)
+    # Use argmax to convert probabilities to 0, 1.
+    probabilities = tf.nn.softmax(logits)
+    predictions=tf.argmax(probabilities, axis=1)
 
     if mode == tf.estimator.ModeKeys.PREDICT:
-        return tf.estimator.EstimatorSpec(mode, predictions=tf.argmax(y_hat, axis=1))
+        return tf.estimator.EstimatorSpec(mode, predictions=predictions)
 
     loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(
-        logits=logits, 
+        logits=logits,
         labels=labels))
     # TF does not automatically add regularization losses.
     l2_loss = tf.losses.get_regularization_loss()  # Scalar value
     loss += l2_loss
 
-    train_op = tf.train.AdamOptimizer(learning_rate=params['learning_rate']).minimize(
-        loss, global_step=tf.train.get_global_step(), 
-        name='train_acc' if is_training else 'dev_acc')
+    optimizer = tf.train.AdamOptimizer(learning_rate=params['learning_rate'])
+    train_op = optimizer.minimize(loss, global_step=tf.train.get_global_step())
+        #name='train_acc' if is_training else 'dev_acc')
 
-    # Assume onehot
-    acc = tf.metrics.accuracy(labels=tf.argmax(labels, axis=1), 
-                              predictions=tf.argmax(y_hat, axis=1),
-                              name='train_acc' if is_training else 'dev_acc')
+    # Assume onehot labels. Returns the metric and the update op.
+    # Give the variables different train/dev prefixes so that they are tracked separately.
+    acc = tf.metrics.accuracy(labels=tf.argmax(labels, axis=1),
+                              predictions=predictions,
+                              name='train_accuracy' if is_training else 'dev_accuracy')
+    precision = tf.metrics.precision(labels=tf.argmax(labels, axis=1),
+                              predictions=predictions,
+                              name='train_precision' if is_training else 'dev_precision')
+    recall = tf.metrics.recall(labels=tf.argmax(labels, axis=1),
+                              predictions=predictions,
+                              name='train_recall' if is_training else 'dev_recall')
+    auc = tf.metrics.auc(labels=tf.argmax(labels, axis=1),
+                              predictions=predictions,
+                              name='train_auc' if is_training else 'dev_auc')
 
-    metrics = {'accuracy': acc}
+    # Used in EVAL mode. Loss is calculated by default. Add others here.
+    eval_metrics = {'accuracy': acc,
+               'precision': precision,
+               'recall': recall,
+               'auc': auc}
     # Make available to tensorboard in TRAIN mode. http://localhost:6006
     tf.summary.scalar('accuracy', acc[1])
+    tf.summary.scalar('precision', precision[1])
+    tf.summary.scalar('recall', recall[1])
+    tf.summary.scalar('auc', auc[1])
+    tf.summary.histogram('probabilities', probabilities)
 
+    if mode == tf.estimator.ModeKeys.EVAL:
+        return tf.estimator.EstimatorSpec(
+            mode=mode,
+            predictions=predictions,
+            loss=loss,
+            eval_metric_ops=eval_metrics)
+
+    # TRAIN mode
     return tf.estimator.EstimatorSpec(
         mode=mode,
-        predictions=tf.argmax(y_hat, axis=1),
+        predictions=predictions,
         loss=loss,
         train_op=train_op,
-        eval_metric_ops=metrics)
+        eval_metric_ops=eval_metrics)
 
 
 # Returns the index of the checkpoint entry with the highest dev accuracy
@@ -516,8 +545,8 @@ def bestCheckpointIndex(checkpoint_tracker):
 # plateau before considering early stopping.
 # TODO: Better early stopping. See https://github.com/tensorflow/tensorflow/issues/18394
 # (the feature will be released in TF 1.10).
-def shouldStopEarly(training_accuracies, training_losses, dev_accuracies, dev_losses, epoch):
-    if epoch < ES_MIN_EPOCHS:
+def shouldStopEarly(training_accuracies, training_losses, dev_accuracies, dev_losses, epoch, params):
+    if epoch < params['es_min_epochs']:
         # Clearly too early to stop training
         return False
     lowest_dev_loss = np.min(dev_losses[0:epoch+1])
@@ -559,13 +588,17 @@ def trainModel(train_metadata, dev_metadata, params, results):
     batch_size = params['batch_size']
     conv1_width = params['conv1_width']
     print('==========================================================================')
-    print('\nBEGIN LEARNING_RATE: {}, BATCH_SIZE: {}, DROP_RATE: {}, L2_SCALE: {}, CONV1_WIDTH: {}'.format(learning_rate, batch_size, drop_rate, l2_scale, conv1_width))
+    print('\nBEGIN MODEL: {}, LEARNING_RATE: {}, BATCH_SIZE: {}, DROP_RATE: {}, L2_SCALE: {}, CONV1_WIDTH: {}'.format(params['model_name'], params['learning_rate'], params['batch_size'], params['drop_rate'], params['l2_scale'], params['conv1_width']))
     start_time = time.time()
 
     # The training dataset needs to last for all epochs, for use with one_shot_iterator.
-    train_dataset = train_metadata['dataset']
-    train_dataset = train_dataset.shuffle(SHUFFLE_BUFFER).repeat(MAX_NUM_EPOCHS).batch(batch_size)
+    raw_train_dataset = train_metadata['dataset']
+    eval_of_train_dataset = raw_train_dataset.batch(batch_size)
+    # Returns features, label each time it is called. Do not need to repeat and shuffle for eval.
+    def evalOfTrainInputFn():
+        return eval_of_train_dataset.make_one_shot_iterator().get_next()
 
+    train_dataset = raw_train_dataset.shuffle(SHUFFLE_BUFFER).repeat(MAX_NUM_EPOCHS).batch(batch_size)
     # Returns features, label each time it is called.
     def trainInputFn():
         return train_dataset.make_one_shot_iterator().get_next()
@@ -618,15 +651,16 @@ def trainModel(train_metadata, dev_metadata, params, results):
         model.train(input_fn=trainInputFn,
                     steps=num_steps_in_epoch)
 
-        eval_of_train = model.evaluate(trainInputFn)       
-        eval_of_dev = model.evaluate(devInputFn)
+        # On Tensorboard, these will show up as 'eval_training' and 'eval_validation'
+        eval_of_train = model.evaluate(evalOfTrainInputFn, name='training')
+        eval_of_dev = model.evaluate(devInputFn, name='validation')
 
         latest_train_acc = np.asscalar(eval_of_train['accuracy'])
         latest_train_loss = np.asscalar(eval_of_train['loss'])
         latest_dev_acc = np.asscalar(eval_of_dev['accuracy'])
         latest_dev_loss = np.asscalar(eval_of_dev['loss'])
         print("Epoch: {:02d}/{} => Train Loss: {:.3f}, Dev Loss: {:.3f}. Train Acc: {:.3f}, Dev Acc: {:.3f}".format(epoch+1, MAX_NUM_EPOCHS, latest_train_loss, latest_dev_loss, latest_train_acc, latest_dev_acc))
-        
+
         training_accuracies[epoch] = latest_train_acc
         training_losses[epoch] = latest_train_loss
         dev_accuracies[epoch] = latest_dev_acc
@@ -636,7 +670,7 @@ def trainModel(train_metadata, dev_metadata, params, results):
         # Keep only as much data as we have checkpoints saved
         checkpoint_tracker = checkpoint_tracker[-NUM_CHECKPOINTS_SAVED:]
 
-        if shouldStopEarly(training_accuracies, training_losses, dev_accuracies, dev_losses, epoch):
+        if shouldStopEarly(training_accuracies, training_losses, dev_accuracies, dev_losses, epoch, params):
             break
 
     best_cp_index = bestCheckpointIndex(checkpoint_tracker)
@@ -645,7 +679,8 @@ def trainModel(train_metadata, dev_metadata, params, results):
     elapsed_time = time.time() - start_time
     elapsed_hours = int(elapsed_time / 3600)
     elapsed_minutes = int((elapsed_time - (elapsed_hours * 3600)) / 60)
-    results['accurate_runs'].append((cp_dev_acc, 'dev_acc: {:.3f} batch_size: {} learn_rate: {:.4f} drop_rate: {:.3f} l2_scale: {:.3f} conv1_width: {} cp_path: {} ({} epochs, {} hours {} mins)'.format(cp_dev_acc, batch_size, learning_rate, drop_rate, l2_scale, conv1_width, cp_path, epoch+1, elapsed_hours, elapsed_minutes)))
+    # TODO: Get these params from params[] map rather than globals.
+    results['accurate_runs'].append((cp_dev_acc, 'dev_acc: {:.3f} batch_size: {} learning_rate: {:.4f} drop_rate: {:.3f} l2_scale: {:.3f} conv1_width: {} cp_path: {} ({} epochs, {} hours {} mins)'.format(cp_dev_acc, params['batch_size'], params['learning_rate'], params['drop_rate'], params['l2_scale'], params['conv1_width'], cp_path, epoch+1, elapsed_hours, elapsed_minutes)))
 
     print('\nRUN RESULTS: {}'.format(results['accurate_runs'][-1][1]))
 
@@ -690,7 +725,7 @@ def printResults(results):
         print('{}: {}'.format(name, numwrong))
 
 
-if __name__=='__main__':
+def runMain():
     print('This version of TF built with CUDA? {}'.format(tf.test.is_built_with_cuda()))
     print(device_lib.list_local_devices())
     #sess = tf.Session(config=tf.ConfigProto(log_device_placement=True))
@@ -699,20 +734,7 @@ if __name__=='__main__':
     tf.logging.set_verbosity(tf.logging.ERROR)
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-    # hyperparameters should be optimized using the dev set.
-    # High learning rates cause error/accuracy to jump around and interfere with early stopping,
-    # but strong regularization seems to help.
-    LEARNING_RATES = [4e-4, 2e-4]
-    BATCH_SIZES = [32]
-    DROP_RATES = [0.01, 0.005]  # Use with logbinned, conv
-    #DROP_RATES = [0.1, 0.01, 0]  # Use with logbinned, fully connected
-    #DROP_RATES = [0.2, 0.25]  # Use with full 8k
-    # L2_SCALE cannot be 0
-    L2_SCALES = [0.004, 0.002]  # Use with logbinned, conv
-    #L2_SCALES = [0.001, 0.01, 0.1]  # Use with logbinned, fully connected
-    #L2_SCALES = [0.1, 0.05]  # Use with full 8k
-    CONV1_WIDTH = [7, 13]  # Use with  logbinned, conv
-
+    ES_MIN_EPOCHS = 20
     if ARGS.adaptive:
         print('Will use adaptive gaussian smoothing using ivar and flux.')
     elif ARGS.loglam:
@@ -721,36 +743,69 @@ if __name__=='__main__':
     else:
         print('Will use raw ivar and flux channels.')
 
-    # Adjust early stopping min epochs up if we are given a smaller dataset, to make sure
-    # we train for a similar number of steps at least.
-    ES_MIN_EPOCHS /= ARGS.fraction
+    if not ARGS.modelname in globals():
+        print('ERROR: Model {} does not exist!'.format(ARGS.modelname))
+        sys.exit(1)
 
+    print('Will use model {}'.format(ARGS.modelname))
     print('\nStarting at datetime: {}'.format(str(datetime.now())))
 
-    train_metadata = datasetFromFitsDirectory(TRAIN_DATA_DIR, ARGS.fraction)
-    dev_metadata = datasetFromFitsDirectory(DEV_DATA_DIR, ARGS.fraction)
-    print('Finished loading data at datetime: {}'.format(str(datetime.now())))
+    # Adjust early stopping min epochs up if we are given a smaller dataset, to make sure
+    # we train for a similar number of steps at least.
+    ES_MIN_EPOCHS = int(ES_MIN_EPOCHS/ARGS.fraction)
 
-    results = {'incorrect': {},
-               'accurate_runs' : [],
-              }
+    # hyperparameters should be optimized using the dev set.
+    # High learning rates cause error/accuracy to jump around and interfere with early stopping,
+    # but strong regularization seems to help.
+    LEARNING_RATES = [4e-4, 3e-4]
+    BATCH_SIZES = [32]
+    DROP_RATES = [0.007]  # Use with logbinned, conv
+    #DROP_RATES = [0.1, 0.01, 0]  # Use with logbinned, fully connected
+    #DROP_RATES = [0.2, 0.25]  # Use with full 8k
+    # L2_SCALE cannot be 0
+    L2_SCALES = [0.001, 0.003]  # Use with logbinned, conv
+    #L2_SCALES = [0.001, 0.01, 0.1]  # Use with logbinned, fully connected
+    #L2_SCALES = [0.1, 0.05]  # Use with full 8k
+    CONV1_WIDTH = [5, 7, 9]  # Use with logbinned, conv
+
     combinations = list(itertools.product(LEARNING_RATES, BATCH_SIZES, DROP_RATES, L2_SCALES, CONV1_WIDTH))
     random.shuffle(combinations)
+    all_params_combs = []
+    print('Will run the following combinations of hyperparams:')
     for (learning_rate, batch_size, drop_rate, l2_scale, conv1_width) in combinations:
+        # All of these params may not be used by the model.
         train_params={
                 # Fixed params:
+                'model_name': ARGS.modelname,
                 'num_classes': 2,
+                'es_min_epochs': ES_MIN_EPOCHS,
                 'hidden_dense_layers': 2,
                 'input_width': ARGS.loglam,
                 # hyperparams:
-                'learning_rate': learning_rate, 
+                'learning_rate': learning_rate,
                 'batch_size': batch_size,
                 'drop_rate': drop_rate,
                 'l2_scale': l2_scale,
                 'conv1_width': conv1_width,
                 }
+        all_params_combs.append(train_params)
+        print(train_params)
+
+    train_metadata = datasetFromFitsDirectory(TRAIN_DATA_DIR, ARGS.fraction)
+    dev_metadata = datasetFromFitsDirectory(DEV_DATA_DIR, 1.0)
+    # dev_metadata = datasetFromFitsDirectory(DEV_DATA_DIR, ARGS.fraction)
+    print('Finished loading data at datetime: {}'.format(str(datetime.now())))
+
+    results = {'incorrect': {},
+               'accurate_runs' : [],
+              }
+    for train_params in all_params_combs:
         trainModel(train_metadata, dev_metadata, train_params, results)
 
     printResults(results)
 
     print('Finished at datetime: {}'.format(str(datetime.now())))
+
+
+if __name__=='__main__':
+    runMain()
