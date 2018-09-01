@@ -73,10 +73,13 @@ relu = tf.nn.relu
 xavier_init = tf.contrib.layers.xavier_initializer()
 regularizer = tf.contrib.layers.l2_regularizer
 
-parser = argparse.ArgumentParser(description='Loads spectra from fits files, trains model.')
+parser = argparse.ArgumentParser(description='Loads spectra from fits files, trains (or evaluates) model.')
+parser.add_argument('-e', '--evalconfig', type=str, default='', help='File containing set of configs for evaluation (no training)')
+parser.add_argument('-d', '--evaldata', type=str, default='', help='Path of dir containing dev/test data to be evaluated.')
 parser.add_argument('-m', '--modelname', type=str, default='logBin4Conv2Dense', help='String name of model function to use.')
 parser.add_argument('-a', '--adaptive', type=bool, default=False, help='Use adaptive gaussian smoothing that combines ivar and flux into one series.')
 parser.add_argument('-l', '--loglam', type=int, default=0, help='Use adaptive gaussian smoothing AND log(lambda) rescaling and binning of adaptive flux into this pixel width.')
+parser.add_argument('-i', '--layershidden', type=int, default=2, help='denseNetBuilder: # of hidden layers.')
 parser.add_argument('-f', '--fraction', type=float, default=1.0, help='Fraction of training data to be loaded.')
 ARGS = parser.parse_args()
 
@@ -119,7 +122,6 @@ def datasetFromFitsDirectory(directory_path, load_fraction=1.0):
 
 
 # Tensorflow network architecture definition
-# TODO: Make some of the conv1d sizes etc hyperparameters
 
 def denseNetBuilder(x, is_training, params):
     num_classes = params['num_classes']
@@ -170,15 +172,16 @@ def logBin2Conv2Dense(x, is_training, params):
     num_classes = params['num_classes']
     drop_rate = params['drop_rate']
     l2_scale = params['l2_scale']
+    conv1_width = params['conv1_width']
 
     # Input: 70 x 1, outputs: 60 x 8, weights: 1 x 10 x 8 = 80
-    net = conv1d(x, 8, 10, strides=1, padding='valid', data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    net = conv1d(x, 8, conv1_width, strides=1, padding='valid', data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
     # Input: 60 x 8, outputs: 30 x 8, weights: 0
     net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool1')
     net = dropout(net, rate=drop_rate, training=is_training, name='pool1_dropout')
 
     # Input: 30 x 8, outputs: 30 x 16, weights: 8 x 10 x 16 = 1280
-    net = conv1d(net, 16, 10, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    net = conv1d(net, 16, conv1_width, strides=1, padding='same', data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
     # Input: 30 x 16, outputs: 15 x 16, weights: 0
     net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool2')
     net = dropout(net, rate=drop_rate, training=is_training, name='pool2_dropout')
@@ -437,6 +440,53 @@ def medium1DCNN(x, is_training, params):
     return logits, x
 
 
+def full8k5Conv2Dense(x, is_training, params):
+    num_classes = params['num_classes']
+    drop_rate = params['drop_rate']
+    l2_scale = params['l2_scale']
+    conv1_width = params['conv1_width']
+    strides = params['strides']
+    max_pool = params['max_pool']
+
+    # Channels refers to flux/ivar (2 channels), or if adaptive smoothing, a single channel.
+    net = conv1d(x, 8, conv1_width, strides=strides, data_format='channels_last', activation=relu, name='conv1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    # conv1d reshapes output to [batch, out_width, out_channels]
+    # 1633 x 8
+    net = max_pooling1d(net, max_pool, max_pool, data_format='channels_last', name='pool1')
+    # 820 x 8
+    # net = dropout(net, rate=drop_rate, training=is_training, name='pool1_dropout')
+    # 820 x 8
+
+    net = conv1d(net, 16, conv1_width, strides=strides, data_format='channels_last', activation=relu, name='conv2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    # 164 x 16
+    net = max_pooling1d(net, max_pool, max_pool, data_format='channels_last', name='pool2')
+    # 82 x 16
+    net = dropout(net, rate=drop_rate, training=is_training, name='pool2_dropout')
+    # 82 x 16
+
+    net = conv1d(net, 32, 7, strides=2, data_format='channels_last', activation=relu, name='conv3', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    # 16 x 32
+    net = max_pooling1d(net, 2, 2, data_format='channels_last', name='pool3')
+    # 8 x 32
+    net = dropout(net, rate=drop_rate, training=is_training, name='pool3_dropout')
+    # 8 x 32
+
+    net = conv1d(net, 64, 5, strides=1, data_format='channels_last', activation=relu, name='conv4', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    # 16 x 32
+    net = max_pooling1d(net, 4, 4, data_format='channels_last', name='pool4')
+    # 8 x 32
+    net = dropout(net, rate=drop_rate, training=is_training, name='pool4_dropout')
+    # 8 x 32
+
+    net = flatten(net, name='flatten')
+    # 256
+    net = dense(net, 16, activation=relu, name='fc1', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    net = dropout(net, rate=drop_rate, training=is_training, name='fc1_dropout')
+
+    logits = dense(net, num_classes, name='fc2', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))
+    return logits, x
+
+
 # Print summary about the learned network, including weights.
 # Input: Estimator (model). Requires latest checkpoint to be available.
 def printNetworkInfo(model, print_weights=False):
@@ -503,12 +553,13 @@ def modelFn(features, labels, mode, params):
                'precision': precision,
                'recall': recall,
                'auc': auc}
-    # Make available to tensorboard in TRAIN mode. http://localhost:6006
+    # Make data available to Tensorboard. http://localhost:6006
     tf.summary.scalar('accuracy', acc[1])
     tf.summary.scalar('precision', precision[1])
     tf.summary.scalar('recall', recall[1])
     tf.summary.scalar('auc', auc[1])
-    tf.summary.histogram('probabilities', probabilities)
+    # Draw the histograms separately.
+    tf.summary.histogram('training probabilities' if is_training else 'dev probabilities', probabilities)
 
     if mode == tf.estimator.ModeKeys.EVAL:
         return tf.estimator.EstimatorSpec(
@@ -586,9 +637,8 @@ def deleteExtraCheckpoints(cp_path):
 
 def trainModel(train_metadata, dev_metadata, params, results):
     batch_size = params['batch_size']
-    conv1_width = params['conv1_width']
     print('==========================================================================')
-    print('\nBEGIN MODEL: {}, LEARNING_RATE: {}, BATCH_SIZE: {}, DROP_RATE: {}, L2_SCALE: {}, CONV1_WIDTH: {}'.format(params['model_name'], params['learning_rate'], params['batch_size'], params['drop_rate'], params['l2_scale'], params['conv1_width']))
+    print('\nBEGIN MODEL: {}, LEARNING_RATE: {}, BATCH_SIZE: {}, DROP_RATE: {}, L2_SCALE: {}, CONV1_WIDTH: {}, STRIDES: {}, MAX_POOL: {}'.format(params['model_name'], params['learning_rate'], params['batch_size'], params['drop_rate'], params['l2_scale'], params['conv1_width'], params['strides'], params['max_pool']))
     start_time = time.time()
 
     # The training dataset needs to last for all epochs, for use with one_shot_iterator.
@@ -648,8 +698,14 @@ def trainModel(train_metadata, dev_metadata, params, results):
     dev_accuracies = np.zeros(MAX_NUM_EPOCHS)
     dev_losses = np.zeros(MAX_NUM_EPOCHS)
     for epoch in range(MAX_NUM_EPOCHS):
-        model.train(input_fn=trainInputFn,
-                    steps=num_steps_in_epoch)
+        # Some params may result in negative dimension error. Catch and discard this training run.
+        try:
+            model.train(input_fn=trainInputFn,
+                        steps=num_steps_in_epoch)
+        except:
+            print('!!!!!! Incompatible model params for params')
+            print(params)
+            return
 
         # On Tensorboard, these will show up as 'eval_training' and 'eval_validation'
         eval_of_train = model.evaluate(evalOfTrainInputFn, name='training')
@@ -680,7 +736,7 @@ def trainModel(train_metadata, dev_metadata, params, results):
     elapsed_hours = int(elapsed_time / 3600)
     elapsed_minutes = int((elapsed_time - (elapsed_hours * 3600)) / 60)
     # TODO: Get these params from params[] map rather than globals.
-    results['accurate_runs'].append((cp_dev_acc, 'dev_acc: {:.3f} batch_size: {} learning_rate: {:.4f} drop_rate: {:.3f} l2_scale: {:.3f} conv1_width: {} cp_path: {} ({} epochs, {} hours {} mins)'.format(cp_dev_acc, params['batch_size'], params['learning_rate'], params['drop_rate'], params['l2_scale'], params['conv1_width'], cp_path, epoch+1, elapsed_hours, elapsed_minutes)))
+    results['accurate_runs'].append((cp_dev_acc, 'dev_acc: {:.3f} batch_size: {} learning_rate: {:.4f} drop_rate: {:.3f} l2_scale: {:.3f} conv1_width: {} strides: {} max_pool: {} cp_path: {} ({} epochs, {} hours {} mins)'.format(cp_dev_acc, params['batch_size'], params['learning_rate'], params['drop_rate'], params['l2_scale'], params['conv1_width'], params['strides'], params['max_pool'], cp_path, epoch+1, elapsed_hours, elapsed_minutes)))
 
     print('\nRUN RESULTS: {}'.format(results['accurate_runs'][-1][1]))
 
@@ -725,7 +781,7 @@ def printResults(results):
         print('{}: {}'.format(name, numwrong))
 
 
-def runMain():
+def runMainTrain():
     print('This version of TF built with CUDA? {}'.format(tf.test.is_built_with_cuda()))
     print(device_lib.list_local_devices())
     #sess = tf.Session(config=tf.ConfigProto(log_device_placement=True))
@@ -757,29 +813,37 @@ def runMain():
     # hyperparameters should be optimized using the dev set.
     # High learning rates cause error/accuracy to jump around and interfere with early stopping,
     # but strong regularization seems to help.
-    LEARNING_RATES = [4e-4, 3e-4]
+    LEARNING_RATES = [4e-4, 1e-4]
     BATCH_SIZES = [32]
-    DROP_RATES = [0.007]  # Use with logbinned, conv
-    #DROP_RATES = [0.1, 0.01, 0]  # Use with logbinned, fully connected
-    #DROP_RATES = [0.2, 0.25]  # Use with full 8k
-    # L2_SCALE cannot be 0
-    L2_SCALES = [0.001, 0.003]  # Use with logbinned, conv
-    #L2_SCALES = [0.001, 0.01, 0.1]  # Use with logbinned, fully connected
-    #L2_SCALES = [0.1, 0.05]  # Use with full 8k
-    CONV1_WIDTH = [5, 7, 9]  # Use with logbinned, conv
 
-    combinations = list(itertools.product(LEARNING_RATES, BATCH_SIZES, DROP_RATES, L2_SCALES, CONV1_WIDTH))
+    #DROP_RATES = [0.007]  # Use with logbinned, conv
+    #DROP_RATES = [0.1, 0.01, 0]  # Use with logbinned, fully connected
+    DROP_RATES = [0.25]  # Use with full 8k
+
+    # L2_SCALE cannot be 0
+    #L2_SCALES = [0.001, 0.003]  # Use with logbinned, conv
+    #L2_SCALES = [0.001, 0.01, 0.1]  # Use with logbinned, fully connected
+    L2_SCALES = [0.1]  # Use with full 8k
+
+    #CONV1_WIDTH = [5]  # Use with logbinned, conv
+    #CONV1_WIDTH = [5, 7, 9]  # Use with logbinned, conv
+    CONV1_WIDTH = [15, 31, 61]  # Use with full 8k
+
+    STRIDES = [3, 5]  # Use with full 8k
+    MAX_POOL = [2, 4]  # Use with full 8k
+
+    combinations = list(itertools.product(LEARNING_RATES, BATCH_SIZES, DROP_RATES, L2_SCALES, CONV1_WIDTH, STRIDES, MAX_POOL))
     random.shuffle(combinations)
     all_params_combs = []
     print('Will run the following combinations of hyperparams:')
-    for (learning_rate, batch_size, drop_rate, l2_scale, conv1_width) in combinations:
+    for (learning_rate, batch_size, drop_rate, l2_scale, conv1_width, strides, max_pool) in combinations:
         # All of these params may not be used by the model.
         train_params={
                 # Fixed params:
                 'model_name': ARGS.modelname,
                 'num_classes': 2,
                 'es_min_epochs': ES_MIN_EPOCHS,
-                'hidden_dense_layers': 2,
+                'hidden_dense_layers': ARGS.layershidden,
                 'input_width': ARGS.loglam,
                 # hyperparams:
                 'learning_rate': learning_rate,
@@ -787,6 +851,8 @@ def runMain():
                 'drop_rate': drop_rate,
                 'l2_scale': l2_scale,
                 'conv1_width': conv1_width,
+                'strides': strides,
+                'max_pool': max_pool,
                 }
         all_params_combs.append(train_params)
         print(train_params)
@@ -807,5 +873,83 @@ def runMain():
     print('Finished at datetime: {}'.format(str(datetime.now())))
 
 
+# Loads checkpoint from saved_model_dir, evaluates it on dev_metadata using modelFn.
+def evaluateModel(dev_metadata, params):
+    dev_dataset = dev_metadata['dataset']
+    dev_dataset = dev_dataset.batch(params['batch_size'])
+
+    dev_features = dev_metadata['features']
+    dev_labels = dev_metadata['labels']
+    dev_filenames = dev_metadata['filenames']
+
+    # Returns features, label each time it is called.
+    def devInputFn():
+        return dev_dataset.make_one_shot_iterator().get_next()
+
+    cp_path=params['cp_path']
+    #print('Using checkpoint: {}'.format(cp_path))
+    saved_model_dir = os.path.dirname(cp_path)
+
+    model = tf.estimator.Estimator(
+        modelFn,
+        params=params,
+        model_dir=saved_model_dir)
+
+    try:
+        eval_of_test = model.evaluate(devInputFn, checkpoint_path=cp_path, name='test')
+    except:
+        print('!!!!!! Incompatible model params for {}'.format(cp_path))
+        return
+
+    test_acc = np.asscalar(eval_of_test['accuracy'])
+    test_loss = np.asscalar(eval_of_test['loss'])
+    print("Architecture: {} model_dir: {} input_width: {} conv1_width: {} strides: {} max_pool: {} Test Loss: {:.3f}, Test Acc: {:.3f}".format(params['model_name'], os.path.basename(saved_model_dir), params['input_width'], params['conv1_width'], params['strides'], params['max_pool'], test_loss, test_acc))
+
+
+def runMainEval():
+    all_params = []
+    # Read eval configs from file. Each line looks like:
+    #conv1_width:5 input_width:128 cp_path:/Users.../2018-08-10-02-19-43/model.ckpt-1275
+    with open(ARGS.evalconfig) as f:
+        for line in f.readlines():
+            params = {
+                # Default (and unused) params that might be needed to completely specify the model:
+                'model_name': ARGS.modelname,
+                'num_classes': 2,
+                'hidden_dense_layers': ARGS.layershidden,
+                'drop_rate': 0,
+                'l2_scale': 0.01,  # Cannot be 0
+                'learning_rate': 0.001,
+                'batch_size': 32,
+                # Params that actually affect the architecture:
+                'input_width': ARGS.loglam,
+                'conv1_width': 7,
+                'strides': 5,
+                'max_pool': 2,
+            }
+            for phrase in line.rstrip().split():
+                key, val = phrase.split(':')
+                # Some values could be int (no use case for float yet)
+                try:
+                    val = int(val)
+                except:
+                    pass
+                params[key] = val
+            print(params)
+            all_params.append(params)
+
+    dev_metadata = datasetFromFitsDirectory(DEV_DATA_DIR, ARGS.fraction)
+    print('Finished loading data at datetime: {}'.format(str(datetime.now())))
+    for params in all_params:
+        evaluateModel(dev_metadata, params)
+
+
 if __name__=='__main__':
-    runMain()
+    if ARGS.evaldata:
+        DEV_DATA_DIR = ARGS.evaldata
+        print('Will load dev/test data for evaluation from: {}'.format(DEV_DATA_DIR))
+
+    if ARGS.evalconfig:
+        runMainEval()
+    else:
+        runMainTrain()
