@@ -4,7 +4,7 @@
 Uses Estimator (new eager execution style).
 
 To protect from being killed by terminal closing:
-nohup $SHELL -c "python3 -u tf_trainer.py [-a True] [-l 100] 2>&1 | grep --line-buffered -v gpu_device.cc > ../logs/training.log" &
+nohup $SHELL -c "python3 -u tf_trainer.py -m modelname [-a True] [-l 256] 2>&1 | grep --line-buffered -v gpu_device.cc > ../logs/training.log" &
 tail -f ../logs/training.log
 
 Works with TF v1.8 GPU, not with v1.9, as of 7/14/18.
@@ -13,6 +13,7 @@ To check TF version:
 """
 
 from __future__ import division, print_function, absolute_import
+from confidence_calibration import TemperatureScaling
 from datetime import datetime
 from os.path import expanduser
 from spectrum_class import Spectrum
@@ -84,6 +85,14 @@ parser.add_argument('-f', '--fraction', type=float, default=1.0, help='Fraction 
 ARGS = parser.parse_args()
 
 
+# Inverse of argmax. Works only for 2 classes. 0 -> [1 0], 1 -> [0 1]
+def classLabelsToOneHot(labels):
+    out = np.zeros((labels.shape[0], 2), dtype=int)
+    out[:, 0] = 1 - labels
+    out[:, 1] = labels
+    return out
+
+
 # See https://www.tensorflow.org/programmers_guide/datasets#consuming_numpy_arrays
 # Given a directory, go to the "star" subdirectory (label=0),
 # then "nonstar" subdirectory (label=1). Load features from each .fits file.
@@ -122,6 +131,8 @@ def datasetFromFitsDirectory(directory_path, load_fraction=1.0):
 
 
 # Tensorflow network architecture definition
+# Note that the last (typically dense) layer should not have any activation function, since we want
+# to interpret that output as logits and apply softmax to it (later).
 
 def denseNetBuilder(x, is_training, params):
     num_classes = params['num_classes']
@@ -487,6 +498,20 @@ def full8k5Conv2Dense(x, is_training, params):
     return logits, x
 
 
+# Number of weights will be 4 * lstm_units * (lstm_units + 1)
+def logBinLSTM1Layer(x, is_training, params):
+    num_classes = params['num_classes']
+    drop_rate = params['drop_rate']
+    l2_scale = params['l2_scale']
+    lstm_units = params['lstm_units']
+
+    cell = tf.nn.rnn_cell.BasicLSTMCell(lstm_units)  
+    cell = tf.nn.rnn_cell.DropoutWrapper(cell, output_keep_prob=1.0-drop_rate)
+    outputs, final_states = tf.nn.dynamic_rnn(cell, x, dtype=tf.float32)
+    logits = dense(final_states.h, num_classes, name='fc', kernel_initializer=xavier_init, kernel_regularizer=regularizer(scale=l2_scale))  
+    return logits, x
+
+
 # Print summary about the learned network, including weights.
 # Input: Estimator (model). Requires latest checkpoint to be available.
 def printNetworkInfo(model, print_weights=False):
@@ -510,18 +535,30 @@ def printNetworkInfo(model, print_weights=False):
 # Assumes labels follows the onehot style.
 def modelFn(features, labels, mode, params):
     is_training = (mode == tf.estimator.ModeKeys.TRAIN)
-    # Change network model here
+    # Allow network model to be picked dynamically
     logits, x = globals()[params['model_name']](
                 features['features'],
                 is_training,
                 params)
+
+    # Apply temperature scaling to logits to get properly calibrated probabilities (confidence).
+    # See https://arxiv.org/pdf/1706.04599.pdf
+    logits = logits / params['temperature']
+
     # Use argmax to convert probabilities to 0, 1.
     probabilities = tf.nn.softmax(logits)
     predictions=tf.argmax(probabilities, axis=1)
 
     if mode == tf.estimator.ModeKeys.PREDICT:
-        return tf.estimator.EstimatorSpec(mode, predictions=predictions)
+        # Package all useful output into a map
+        predict_output = {
+            'predictions': predictions,
+            'probabilities': probabilities,
+            'logits': logits,
+        }
+        return tf.estimator.EstimatorSpec(mode, predictions=predict_output)
 
+    # Negative Log Likelihood (NLL) loss
     loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(
         logits=logits,
         labels=labels))
@@ -531,7 +568,6 @@ def modelFn(features, labels, mode, params):
 
     optimizer = tf.train.AdamOptimizer(learning_rate=params['learning_rate'])
     train_op = optimizer.minimize(loss, global_step=tf.train.get_global_step())
-        #name='train_acc' if is_training else 'dev_acc')
 
     # Assume onehot labels. Returns the metric and the update op.
     # Give the variables different train/dev prefixes so that they are tracked separately.
@@ -638,7 +674,10 @@ def deleteExtraCheckpoints(cp_path):
 def trainModel(train_metadata, dev_metadata, params, results):
     batch_size = params['batch_size']
     print('==========================================================================')
-    print('\nBEGIN MODEL: {}, LEARNING_RATE: {}, BATCH_SIZE: {}, DROP_RATE: {}, L2_SCALE: {}, CONV1_WIDTH: {}, STRIDES: {}, MAX_POOL: {}'.format(params['model_name'], params['learning_rate'], params['batch_size'], params['drop_rate'], params['l2_scale'], params['conv1_width'], params['strides'], params['max_pool']))
+    print('\nBEGIN MODEL: {}, LEARNING_RATE: {}, BATCH_SIZE: {}, DROP_RATE: {}, L2_SCALE: {}, '
+    'CONV1_WIDTH: {}, STRIDES: {}, MAX_POOL: {}, LSTM_UNITS: {}'
+    ''.format(params['model_name'], params['learning_rate'], params['batch_size'], params['drop_rate'],
+    params['l2_scale'], params['conv1_width'], params['strides'], params['max_pool'], params['lstm_units']))
     start_time = time.time()
 
     # The training dataset needs to last for all epochs, for use with one_shot_iterator.
@@ -700,10 +739,9 @@ def trainModel(train_metadata, dev_metadata, params, results):
     for epoch in range(MAX_NUM_EPOCHS):
         # Some params may result in negative dimension error. Catch and discard this training run.
         try:
-            model.train(input_fn=trainInputFn,
-                        steps=num_steps_in_epoch)
+            model.train(input_fn=trainInputFn, steps=num_steps_in_epoch)
         except:
-            print('!!!!!! Incompatible model params for params')
+            print('!!!!!! Training: Incompatible model params?')
             print(params)
             return
 
@@ -715,7 +753,8 @@ def trainModel(train_metadata, dev_metadata, params, results):
         latest_train_loss = np.asscalar(eval_of_train['loss'])
         latest_dev_acc = np.asscalar(eval_of_dev['accuracy'])
         latest_dev_loss = np.asscalar(eval_of_dev['loss'])
-        print("Epoch: {:02d}/{} => Train Loss: {:.3f}, Dev Loss: {:.3f}. Train Acc: {:.3f}, Dev Acc: {:.3f}".format(epoch+1, MAX_NUM_EPOCHS, latest_train_loss, latest_dev_loss, latest_train_acc, latest_dev_acc))
+        print('Epoch: {:02d}/{} => Train Loss: {:.3f}, Dev Loss: {:.3f}. Train Acc: {:.3f}, Dev Acc: {:.3f}'
+              ''.format(epoch+1, MAX_NUM_EPOCHS, latest_train_loss, latest_dev_loss, latest_train_acc, latest_dev_acc))
 
         training_accuracies[epoch] = latest_train_acc
         training_losses[epoch] = latest_train_loss
@@ -735,27 +774,77 @@ def trainModel(train_metadata, dev_metadata, params, results):
     elapsed_time = time.time() - start_time
     elapsed_hours = int(elapsed_time / 3600)
     elapsed_minutes = int((elapsed_time - (elapsed_hours * 3600)) / 60)
-    # TODO: Get these params from params[] map rather than globals.
-    results['accurate_runs'].append((cp_dev_acc, 'dev_acc: {:.3f} batch_size: {} learning_rate: {:.4f} drop_rate: {:.3f} l2_scale: {:.3f} conv1_width: {} strides: {} max_pool: {} cp_path: {} ({} epochs, {} hours {} mins)'.format(cp_dev_acc, params['batch_size'], params['learning_rate'], params['drop_rate'], params['l2_scale'], params['conv1_width'], params['strides'], params['max_pool'], cp_path, epoch+1, elapsed_hours, elapsed_minutes)))
-
-    print('\nRUN RESULTS: {}'.format(results['accurate_runs'][-1][1]))
 
     # Restore the best model from the saved checkpoints and re-evaluate dev on it using model.predict().
-    predicted_classes = list(model.predict(devInputFn, checkpoint_path=cp_path))
+    predict_output = model.predict(devInputFn, checkpoint_path=cp_path)
+    _, temperature = evaluatePredictOutput(predict_output, dev_labels, dev_filenames, params, results, do_temp_scaling=True)
+
+    # Print network info. This uses latest checkpoint, so delete extra checkpoints after this.
+    printNetworkInfo(model, print_weights=False)
+    deleteExtraCheckpoints(cp_path)
+
+    results['accurate_runs'].append((cp_dev_acc, 'cp_dev_acc: {:.3f} train_acc: {:.3f} batch_size: {} '
+    'learning_rate: {:.4f} drop_rate: {:.3f} l2_scale: {:.3f} conv1_width: {} strides: {} max_pool: {} '
+    'lstm_units: {} temperature: {:.2f} cp_path: {} ({} epochs, {} hours {} mins)'
+    ''.format(cp_dev_acc, latest_train_acc, params['batch_size'], params['learning_rate'],
+    params['drop_rate'], params['l2_scale'], params['conv1_width'], params['strides'], params['max_pool'],
+    params['lstm_units'], temperature, cp_path, epoch+1, elapsed_hours, elapsed_minutes)))
+    print('\nRUN RESULTS: {}'.format(results['accurate_runs'][-1][1]))
+
+    print('=================== Done training ========================================')
+
+
+# predict_output is a generator, which will produce a dict for each example.
+# Will append overall stats to results, and print evaluation results.
+# Can optionally do TemperatureScaling.
+# Returns overall accuracy, temperature.
+def evaluatePredictOutput(predict_output, dev_labels, dev_filenames, params, results, do_temp_scaling=False, print_logits_labels=False):
+    dev_labels_onehot = classLabelsToOneHot(dev_labels)
+    predict_output = list(predict_output)  # So we can iterate over it multiple times
+    predicted_classes = [pred_dict['predictions'] for pred_dict in predict_output]  # Class labels, NOT one-hot
+    predicted_classes = np.array(predicted_classes)
+    logits = [pred_dict['logits'] for pred_dict in predict_output]
+    logits = np.array(logits)
+    pre_ece_probabilities = np.array([pred_dict['probabilities'] for pred_dict in predict_output])
+
+    temperature = 1.0
+    if do_temp_scaling:
+        temp_scaling = TemperatureScaling(n_bins=30)
+        print('Before temperature calibration, ECE loss: {:0.3f}'
+              ''.format(temp_scaling.getECELoss(logits, dev_labels_onehot)))
+        temperature = temp_scaling.calculateTemperature(logits, dev_labels_onehot)
+        print('After temperature (={:0.2f}) calibration, ECE loss: {:0.3f}'
+              ''.format(temperature, temp_scaling.getECELoss(logits, dev_labels_onehot, temperature)))
+        # Recompute probabilities using temperature
+        post_ece_probabilities_tf = tf.nn.softmax(logits / temperature)
+        with tf.Session() as sess:
+            post_ece_probabilities = sess.run(post_ece_probabilities_tf)
+
+    if print_logits_labels:
+        print(logits / temperature)
+        print(dev_labels_onehot)
 
     # Print the filenames of the fits we got wrong, for further debugging/analysis
     # Class labels need to be 0 or 1, not onehot.
     truth_labels = dev_labels.tolist()
     print('\nDEV EXAMPLES WE GOT WRONG:')
+    num_wrong = 0
     for i in range(len(truth_labels)):
         dev_filename = dev_filenames[i]
         if (truth_labels[i] != predicted_classes[i]):
+            num_wrong += 1
             if not dev_filename in results['incorrect']:
                 results['incorrect'][dev_filename] = 1
             else:
                 results['incorrect'][dev_filename] = results['incorrect'][dev_filename] + 1
-            print('Predicted {}, true {}: {}'.format(predicted_classes[i], truth_labels[i], dev_filename))
+            if do_temp_scaling:
+                print('Predicted {} (conf {:.2f} -->temp-scaling--> {:.2f}), true {}: {}'.format(predicted_classes[i],
+                    pre_ece_probabilities[i].max(), post_ece_probabilities[i].max(), truth_labels[i], dev_filename))
+            else:
+                print('Predicted {} (conf {:.2f}), true {}: {}'.format(predicted_classes[i],
+                    pre_ece_probabilities[i].max(), truth_labels[i], dev_filename))
 
+    dev_acc = (len(truth_labels) - num_wrong) / len(truth_labels)
     # Print the dev confusion matrix using the best checkpointed model.
     with tf.Session() as sess:
         confusion_matrix = tf.confusion_matrix(truth_labels, predicted_classes)
@@ -763,11 +852,7 @@ def trainModel(train_metadata, dev_metadata, params, results):
         print('\nCONFUSION MATRIX:')
         print(matrix_to_print)
 
-    # Print network info. This uses latest checkpoint, so delete extra checkpoints after this.
-    printNetworkInfo(model, print_weights=False)
-    deleteExtraCheckpoints(cp_path)
-
-    print('==========================================================================')
+    return dev_acc, temperature
 
 
 def printResults(results):
@@ -808,35 +893,43 @@ def runMainTrain():
 
     # Adjust early stopping min epochs up if we are given a smaller dataset, to make sure
     # we train for a similar number of steps at least.
-    ES_MIN_EPOCHS = int(ES_MIN_EPOCHS/ARGS.fraction)
+    #ES_MIN_EPOCHS = int(ES_MIN_EPOCHS/ARGS.fraction)
 
     # hyperparameters should be optimized using the dev set.
     # High learning rates cause error/accuracy to jump around and interfere with early stopping,
     # but strong regularization seems to help.
-    LEARNING_RATES = [4e-4, 1e-4]
-    BATCH_SIZES = [32]
+    LEARNING_RATES = [4e-4, 1e-4]  # Use with conv
+    #LEARNING_RATES = [1e-2, 3e-3, 1e-3]  # Use with logbinned, lstm
+    BATCH_SIZES = [32, 48]
 
-    #DROP_RATES = [0.007]  # Use with logbinned, conv
+    DROP_RATES = [0.007]  # Use with logbinned, conv
     #DROP_RATES = [0.1, 0.01, 0]  # Use with logbinned, fully connected
-    DROP_RATES = [0.25]  # Use with full 8k
+    #DROP_RATES = [0.2, 0.1]  # Use with logbinned, lstm
+    #DROP_RATES = [0.25]  # Use with full 8k
 
     # L2_SCALE cannot be 0
-    #L2_SCALES = [0.001, 0.003]  # Use with logbinned, conv
+    L2_SCALES = [0.001, 0.003]  # Use with logbinned, conv
     #L2_SCALES = [0.001, 0.01, 0.1]  # Use with logbinned, fully connected
-    L2_SCALES = [0.1]  # Use with full 8k
+    #L2_SCALES = [0.003, 0.01]  # Use with logbinned, lstm
+    #L2_SCALES = [0.1]  # Use with full 8k
 
-    #CONV1_WIDTH = [5]  # Use with logbinned, conv
+    CONV1_WIDTH = [5]  # Use with logbinned, conv
     #CONV1_WIDTH = [5, 7, 9]  # Use with logbinned, conv
-    CONV1_WIDTH = [15, 31, 61]  # Use with full 8k
+    #CONV1_WIDTH = [15, 31, 61]  # Use with full 8k
 
-    STRIDES = [3, 5]  # Use with full 8k
-    MAX_POOL = [2, 4]  # Use with full 8k
+    STRIDES = [3]
+    #STRIDES = [3, 5]  # Use with full 8k
+    MAX_POOL = [2]
+    #MAX_POOL = [2, 4]  # Use with full 8k
 
-    combinations = list(itertools.product(LEARNING_RATES, BATCH_SIZES, DROP_RATES, L2_SCALES, CONV1_WIDTH, STRIDES, MAX_POOL))
+    #LSTM_UNITS = [100, 200]
+    LSTM_UNITS = [100]
+
+    combinations = list(itertools.product(LEARNING_RATES, BATCH_SIZES, DROP_RATES, L2_SCALES, CONV1_WIDTH, STRIDES, MAX_POOL, LSTM_UNITS))
     random.shuffle(combinations)
     all_params_combs = []
-    print('Will run the following combinations of hyperparams:')
-    for (learning_rate, batch_size, drop_rate, l2_scale, conv1_width, strides, max_pool) in combinations:
+    print('Will run the following {} combinations of hyperparams:'.format(len(combinations)))
+    for (learning_rate, batch_size, drop_rate, l2_scale, conv1_width, strides, max_pool, lstm_units) in combinations:
         # All of these params may not be used by the model.
         train_params={
                 # Fixed params:
@@ -845,6 +938,7 @@ def runMainTrain():
                 'es_min_epochs': ES_MIN_EPOCHS,
                 'hidden_dense_layers': ARGS.layershidden,
                 'input_width': ARGS.loglam,
+                'temperature': 1.0,
                 # hyperparams:
                 'learning_rate': learning_rate,
                 'batch_size': batch_size,
@@ -853,13 +947,14 @@ def runMainTrain():
                 'conv1_width': conv1_width,
                 'strides': strides,
                 'max_pool': max_pool,
+                'lstm_units': lstm_units,
                 }
         all_params_combs.append(train_params)
         print(train_params)
 
     train_metadata = datasetFromFitsDirectory(TRAIN_DATA_DIR, ARGS.fraction)
-    dev_metadata = datasetFromFitsDirectory(DEV_DATA_DIR, 1.0)
-    # dev_metadata = datasetFromFitsDirectory(DEV_DATA_DIR, ARGS.fraction)
+    #dev_metadata = datasetFromFitsDirectory(DEV_DATA_DIR, 1.0)
+    dev_metadata = datasetFromFitsDirectory(DEV_DATA_DIR, ARGS.fraction)
     print('Finished loading data at datetime: {}'.format(str(datetime.now())))
 
     results = {'incorrect': {},
@@ -874,7 +969,7 @@ def runMainTrain():
 
 
 # Loads checkpoint from saved_model_dir, evaluates it on dev_metadata using modelFn.
-def evaluateModel(dev_metadata, params):
+def evaluateModel(dev_metadata, params, results):
     dev_dataset = dev_metadata['dataset']
     dev_dataset = dev_dataset.batch(params['batch_size'])
 
@@ -887,7 +982,7 @@ def evaluateModel(dev_metadata, params):
         return dev_dataset.make_one_shot_iterator().get_next()
 
     cp_path=params['cp_path']
-    #print('Using checkpoint: {}'.format(cp_path))
+    print('Will evaluate checkpoint: {}'.format(cp_path))
     saved_model_dir = os.path.dirname(cp_path)
 
     model = tf.estimator.Estimator(
@@ -896,14 +991,16 @@ def evaluateModel(dev_metadata, params):
         model_dir=saved_model_dir)
 
     try:
-        eval_of_test = model.evaluate(devInputFn, checkpoint_path=cp_path, name='test')
+        predict_output = model.predict(devInputFn, checkpoint_path=cp_path)
+        test_acc, _ = evaluatePredictOutput(predict_output, dev_labels, dev_filenames, params, results, do_temp_scaling=True, print_logits_labels=True)
     except:
-        print('!!!!!! Incompatible model params for {}'.format(cp_path))
+        print('!!!!!! Likely incompatible model params for {}'.format(cp_path))
         return
 
-    test_acc = np.asscalar(eval_of_test['accuracy'])
-    test_loss = np.asscalar(eval_of_test['loss'])
-    print("Architecture: {} model_dir: {} input_width: {} conv1_width: {} strides: {} max_pool: {} Test Loss: {:.3f}, Test Acc: {:.3f}".format(params['model_name'], os.path.basename(saved_model_dir), params['input_width'], params['conv1_width'], params['strides'], params['max_pool'], test_loss, test_acc))
+    print('Architecture: {} model_dir: {} input_width: {} conv1_width: {} strides: {} max_pool: {} Test-Acc: {:.3f}'
+          ''.format(params['model_name'], os.path.basename(saved_model_dir), params['input_width'],
+          params['conv1_width'], params['strides'], params['max_pool'], test_acc))
+    print('==========================================================================')
 
 
 def runMainEval():
@@ -913,19 +1010,21 @@ def runMainEval():
     with open(ARGS.evalconfig) as f:
         for line in f.readlines():
             params = {
-                # Default (and unused) params that might be needed to completely specify the model:
-                'model_name': ARGS.modelname,
+                # Default (and unused) params that are needed only during training
                 'num_classes': 2,
-                'hidden_dense_layers': ARGS.layershidden,
                 'drop_rate': 0,
                 'l2_scale': 0.01,  # Cannot be 0
                 'learning_rate': 0.001,
                 'batch_size': 32,
-                # Params that actually affect the architecture:
+                # Params that actually affect the architecture and output in PREDICT/EVAL modes:
+                'model_name': ARGS.modelname,
+                'hidden_dense_layers': ARGS.layershidden,
                 'input_width': ARGS.loglam,
                 'conv1_width': 7,
                 'strides': 5,
                 'max_pool': 2,
+                'lstm_units': 1,
+                'temperature': 1.0,
             }
             for phrase in line.rstrip().split():
                 key, val = phrase.split(':')
@@ -940,8 +1039,13 @@ def runMainEval():
 
     dev_metadata = datasetFromFitsDirectory(DEV_DATA_DIR, ARGS.fraction)
     print('Finished loading data at datetime: {}'.format(str(datetime.now())))
+    results = {'incorrect': {},
+               'accurate_runs' : [],
+              }
     for params in all_params:
-        evaluateModel(dev_metadata, params)
+        evaluateModel(dev_metadata, params, results)
+                
+    printResults(results)
 
 
 if __name__=='__main__':
